@@ -2,21 +2,11 @@
 
 A [Zig](https://ziglang.org/) language binding for [MLX](https://github.com/ml-explore/mlx), Apple's array framework for machine learning on Apple Silicon.
 
-## Overview
-
-MLX.zig provides a Zig-native interface to MLX, allowing you to build and run machine learning models on Apple Silicon devices using the Zig programming language. This project demonstrates how to:
-
-- Use MLX from Zig without any additional build tools
-- Implement a transformer-based language model
-- Handle tokenization and text generation
-
 ## Features
 
-- **Pure Zig Build System**: No CMake or other external build tools needed
-- **Complete Dependency Management**: All C/C++ dependencies (MLX, MLX-C, PCRE2, etc.) resolved through Zig's build system
-- **Working LLM Example**: Includes a tokenizer and transformer implementation capable of text generation
-- **Efficient Tokenization**: Uses [PCRE2](https://github.com/PCRE2Project/pcre2) (Perl Compatible Regular Expressions) for fast and reliable text processing
-- **Low-Level MLX Access**: Direct bindings to MLX's C API for maximum performance
+1. **Build System**: Compiles MLX (C++), MLX-C, and PCRE2 from source using Zig's build system (no CMake or other build tools needed)
+2. **Transformer**: Implements a Llama-3.2 language model with attention mechanisms and key-value caching
+3. **Tokenizer**: Uses PCRE2 for efficient regex-based text processing, handling complex patterns and special tokens
 
 ## Prerequisites
 
@@ -24,7 +14,6 @@ MLX.zig provides a Zig-native interface to MLX, allowing you to build and run ma
 - Zig v0.13.0
 
 ## Getting Started
-
 
 1. Clone the repository:
 ```
@@ -39,7 +28,25 @@ cd MLX.zig
 zig build run
 ```
 
-This will compile MLX from source and run a simple text generation demo.
+This will compile MLX from source and run a simple text generation demo:
+
+<details>
+<summary>Click to expand</summary>
+
+```text
+Input: <|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+Cutting Knowledge Date: December 2023
+Today Date: 26 Jul 2024
+
+You are a helpful assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Hello world<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+Output: Hello! It's nice to meet you. Is there something I can help you with or would you
+```
+
+</details>
 
 ## Examples
 
@@ -60,16 +67,6 @@ defer allocator.free(input_ids);
 const output_ids = try transformer.generate(input_ids, num_tokens_to_generate);
 defer allocator.free(output_ids);
 ```
-
-## How it Works
-
-MLX.zig integrates Zig with Apple's ML framework through three key components:
-
-1. **Zig Build System**: Compiles MLX (C++), MLX-C, and PCRE2 from source with zero external dependencies
-2. **Transformer**: Implements a Llama-style language model with attention mechanisms and key-value caching
-3. **Tokenizer**: Uses PCRE2 for efficient regex-based text processing, handling complex patterns and special tokens
-
-The system works by encoding text to tokens, processing them through MLX tensor operations optimized for Apple Silicon, and decoding the generated output back to text—all managed through a clean Zig interface.
 
 ## Acknowledgements
 
