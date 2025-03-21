@@ -1,11 +1,8 @@
 // Copyright 2025 Joe
-
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-
 //     http://www.apache.org/licenses/LICENSE-2.0
-
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -20,15 +17,29 @@ const c = @cImport({
 
 pub const Linear = struct {
     weight: c.mlx_array,
+    scales: ?c.mlx_array,
+    biases: ?c.mlx_array,
+    quants: ?([2]c_int),
     stream: c.mlx_stream,
     prefix: []const u8,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, parent_prefix: []const u8, suffix: []const u8, stream: c.mlx_stream) !Linear {
+    pub fn init(allocator: std.mem.Allocator, parent_prefix: []const u8, suffix: []const u8, config: *const LlamaConfig, stream: c.mlx_stream) !Linear {
         const prefix = try joinPath(allocator, parent_prefix, suffix);
         errdefer allocator.free(prefix);
+        var quants: ?([2]c_int) = null;
+        var scales: ?c.mlx_array = null;
+        var biases: ?c.mlx_array = null;
+        if (config.quantization) |qconfig| {
+            quants = .{ qconfig.group_size, qconfig.bits };
+            biases = c.mlx_array_new();
+            scales = c.mlx_array_new();
+        }
         return Linear{
             .weight = c.mlx_array_new(),
+            .scales = scales,
+            .biases = biases,
+            .quants = quants,
             .stream = stream,
             .prefix = prefix,
             .allocator = allocator,
@@ -36,30 +47,48 @@ pub const Linear = struct {
     }
 
     pub fn load(self: *Linear, weights_map: *const c.mlx_map_string_to_array) !void {
-        try loadWeight(&self.weight, "weight", self.prefix, weights_map, self.allocator);
+        if (self.quants) |_| {
+            try loadQuantized(&self.weight, &self.scales.?, &self.biases.?, "", self.prefix, weights_map, self.allocator);
+        } else {
+            try loadWeight(&self.weight, "", self.prefix, weights_map, self.allocator);
+        }
     }
 
     pub fn deinit(self: *Linear) void {
-        _ = c.mlx_array_free(self.weight);
         self.allocator.free(self.prefix);
+        _ = c.mlx_array_free(self.weight);
+        if (self.quants) |_| {
+            _ = c.mlx_array_free(self.scales.?);
+            _ = c.mlx_array_free(self.biases.?);
+        }
     }
 
     pub fn forward(self: *Linear, result: *c.mlx_array, x: c.mlx_array) !void {
-        try einsum(result, .{ x, self.weight }, "bsh,vh->bsv", self.stream);
+        if (self.quants) |qconfig| {
+            try mlxOp(c.mlx_quantized_matmul(result, x, self.weight, self.scales.?, self.biases.?, true, qconfig[0], qconfig[1], self.stream));
+        } else {
+            try einsum(result, .{ x, self.weight }, "bsh,vh->bsv", self.stream);
+        }
     }
 };
 
 pub const Embedding = struct {
     weight: c.mlx_array,
+    quants: ?([2]c_int),
     stream: c.mlx_stream,
     prefix: []const u8,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, parent_prefix: []const u8, stream: c.mlx_stream) !Embedding {
+    pub fn init(allocator: std.mem.Allocator, parent_prefix: []const u8, config: *const LlamaConfig, stream: c.mlx_stream) !Embedding {
         const prefix = try joinPath(allocator, parent_prefix, "embed_tokens");
         errdefer allocator.free(prefix);
+        var quants: ?([2]c_int) = null;
+        if (config.quantization) |qconfig| {
+            quants = .{ qconfig.group_size, qconfig.bits };
+        }
         return Embedding{
             .weight = c.mlx_array_new(),
+            .quants = quants,
             .stream = stream,
             .prefix = prefix,
             .allocator = allocator,
@@ -67,7 +96,21 @@ pub const Embedding = struct {
     }
 
     pub fn load(self: *Embedding, weights_map: *const c.mlx_map_string_to_array) !void {
-        try loadWeight(&self.weight, "weight", self.prefix, weights_map, self.allocator);
+        if (self.quants) |qconfig| {
+            var qeight = c.mlx_array_new();
+            var scales = c.mlx_array_new();
+            var biases = c.mlx_array_new();
+            defer {
+                _ = c.mlx_array_free(qeight);
+                _ = c.mlx_array_free(scales);
+                _ = c.mlx_array_free(biases);
+            }
+            try loadQuantized(&qeight, &scales, &biases, "", self.prefix, weights_map, self.allocator);
+            try mlxOp(c.mlx_dequantize(&self.weight, qeight, scales, biases, qconfig[0], qconfig[1], self.stream));
+            try mlxOp(c.mlx_array_eval(self.weight));
+        } else {
+            try loadWeight(&self.weight, "", self.prefix, weights_map, self.allocator);
+        }
     }
 
     pub fn forward(self: *Embedding, result: *c.mlx_array, toks: c.mlx_array) !void {
@@ -104,7 +147,7 @@ pub const RMSNorm = struct {
     }
 
     pub fn load(self: *RMSNorm, weights_map: *const c.mlx_map_string_to_array) !void {
-        try loadWeight(&self.weight, "weight", self.prefix, weights_map, self.allocator);
+        try loadWeight(&self.weight, "", self.prefix, weights_map, self.allocator);
     }
 
     pub fn forward(self: *RMSNorm, result: *c.mlx_array, x: c.mlx_array) !void {
@@ -121,17 +164,49 @@ pub const MLP = struct {
     gate_proj: c.mlx_array,
     up_proj: c.mlx_array,
     down_proj: c.mlx_array,
+    gate_scales: ?c.mlx_array,
+    gate_biases: ?c.mlx_array,
+    up_scales: ?c.mlx_array,
+    up_biases: ?c.mlx_array,
+    down_scales: ?c.mlx_array,
+    down_biases: ?c.mlx_array,
+    quants: ?([2]c_int),
     stream: c.mlx_stream,
     prefix: []const u8,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, parent_prefix: []const u8, suffix: []const u8, stream: c.mlx_stream) !MLP {
+    pub fn init(allocator: std.mem.Allocator, parent_prefix: []const u8, suffix: []const u8, config: *const LlamaConfig, stream: c.mlx_stream) !MLP {
         const prefix = try joinPath(allocator, parent_prefix, suffix);
         errdefer allocator.free(prefix);
+        var quants: ?([2]c_int) = null;
+        var gate_scales: ?c.mlx_array = null;
+        var gate_biases: ?c.mlx_array = null;
+        var up_scales: ?c.mlx_array = null;
+        var up_biases: ?c.mlx_array = null;
+        var down_scales: ?c.mlx_array = null;
+        var down_biases: ?c.mlx_array = null;
+
+        if (config.quantization) |qconfig| {
+            quants = .{ qconfig.group_size, qconfig.bits };
+            gate_scales = c.mlx_array_new();
+            gate_biases = c.mlx_array_new();
+            up_scales = c.mlx_array_new();
+            up_biases = c.mlx_array_new();
+            down_scales = c.mlx_array_new();
+            down_biases = c.mlx_array_new();
+        }
+
         return MLP{
             .gate_proj = c.mlx_array_new(),
             .up_proj = c.mlx_array_new(),
             .down_proj = c.mlx_array_new(),
+            .gate_scales = gate_scales,
+            .gate_biases = gate_biases,
+            .up_scales = up_scales,
+            .up_biases = up_biases,
+            .down_scales = down_scales,
+            .down_biases = down_biases,
+            .quants = quants,
             .stream = stream,
             .prefix = prefix,
             .allocator = allocator,
@@ -139,9 +214,15 @@ pub const MLP = struct {
     }
 
     pub fn load(self: *MLP, weights_map: *const c.mlx_map_string_to_array) !void {
-        try loadWeight(&self.gate_proj, "gate_proj.weight", self.prefix, weights_map, self.allocator);
-        try loadWeight(&self.up_proj, "up_proj.weight", self.prefix, weights_map, self.allocator);
-        try loadWeight(&self.down_proj, "down_proj.weight", self.prefix, weights_map, self.allocator);
+        if (self.quants != null) {
+            try loadQuantized(&self.gate_proj, &self.gate_scales.?, &self.gate_biases.?, "gate_proj", self.prefix, weights_map, self.allocator);
+            try loadQuantized(&self.up_proj, &self.up_scales.?, &self.up_biases.?, "up_proj", self.prefix, weights_map, self.allocator);
+            try loadQuantized(&self.down_proj, &self.down_scales.?, &self.down_biases.?, "down_proj", self.prefix, weights_map, self.allocator);
+        } else {
+            try loadWeight(&self.gate_proj, "gate_proj", self.prefix, weights_map, self.allocator);
+            try loadWeight(&self.up_proj, "up_proj", self.prefix, weights_map, self.allocator);
+            try loadWeight(&self.down_proj, "down_proj", self.prefix, weights_map, self.allocator);
+        }
     }
 
     pub fn forward(self: *MLP, result: *c.mlx_array, x: c.mlx_array) !void {
@@ -153,18 +234,36 @@ pub const MLP = struct {
             _ = c.mlx_array_free(sigmoid);
             _ = c.mlx_array_free(up);
         }
-        try einsum(&gate, .{ x, self.gate_proj }, "bld,hd->blh", self.stream);
-        try mlxOp(c.mlx_sigmoid(&sigmoid, gate, self.stream));
-        try mlxOp(c.mlx_multiply(&gate, gate, sigmoid, self.stream));
-        try einsum(&up, .{ x, self.up_proj }, "bld,hd->blh", self.stream);
-        try mlxOp(c.mlx_multiply(result, gate, up, self.stream));
-        try einsum(result, .{ result.*, self.down_proj }, "blh,dh->bld", self.stream);
+
+        if (self.quants) |qconfig| {
+            try mlxOp(c.mlx_quantized_matmul(&gate, x, self.gate_proj, self.gate_scales.?, self.gate_biases.?, true, qconfig[0], qconfig[1], self.stream));
+            try mlxOp(c.mlx_sigmoid(&sigmoid, gate, self.stream));
+            try mlxOp(c.mlx_multiply(&gate, gate, sigmoid, self.stream));
+            try mlxOp(c.mlx_quantized_matmul(&up, x, self.up_proj, self.up_scales.?, self.up_biases.?, true, qconfig[0], qconfig[1], self.stream));
+            try mlxOp(c.mlx_multiply(result, gate, up, self.stream));
+            try mlxOp(c.mlx_quantized_matmul(result, result.*, self.down_proj, self.down_scales.?, self.down_biases.?, true, qconfig[0], qconfig[1], self.stream));
+        } else {
+            try einsum(&gate, .{ x, self.gate_proj }, "bld,hd->blh", self.stream);
+            try mlxOp(c.mlx_sigmoid(&sigmoid, gate, self.stream));
+            try mlxOp(c.mlx_multiply(&gate, gate, sigmoid, self.stream));
+            try einsum(&up, .{ x, self.up_proj }, "bld,hd->blh", self.stream);
+            try mlxOp(c.mlx_multiply(result, gate, up, self.stream));
+            try einsum(result, .{ result.*, self.down_proj }, "blh,dh->bld", self.stream);
+        }
     }
 
     pub fn deinit(self: *MLP) void {
         _ = c.mlx_array_free(self.gate_proj);
         _ = c.mlx_array_free(self.up_proj);
         _ = c.mlx_array_free(self.down_proj);
+        if (self.quants != null) {
+            _ = c.mlx_array_free(self.gate_scales.?);
+            _ = c.mlx_array_free(self.gate_biases.?);
+            _ = c.mlx_array_free(self.up_scales.?);
+            _ = c.mlx_array_free(self.up_biases.?);
+            _ = c.mlx_array_free(self.down_scales.?);
+            _ = c.mlx_array_free(self.down_biases.?);
+        }
         self.allocator.free(self.prefix);
     }
 };
@@ -174,6 +273,15 @@ pub const Attention = struct {
     k_proj: c.mlx_array,
     v_proj: c.mlx_array,
     o_proj: c.mlx_array,
+    q_scales: ?c.mlx_array,
+    q_biases: ?c.mlx_array,
+    k_scales: ?c.mlx_array,
+    k_biases: ?c.mlx_array,
+    v_scales: ?c.mlx_array,
+    v_biases: ?c.mlx_array,
+    o_scales: ?c.mlx_array,
+    o_biases: ?c.mlx_array,
+    quants: ?([2]c_int),
     n_heads: c_int,
     n_kv_heads: c_int,
     head_dim: c_int,
@@ -191,11 +299,42 @@ pub const Attention = struct {
         const scale_array = c.mlx_array_new_float(scale);
         const n_repeat = @divExact(n_heads, n_kv_heads);
         const rope = try Llama3RoPE.init(head_dim, config.max_position_embeddings, false, config.rope_theta, config.rope_scaling, stream);
+        var quants: ?([2]c_int) = null;
+        var q_scales: ?c.mlx_array = null;
+        var q_biases: ?c.mlx_array = null;
+        var k_scales: ?c.mlx_array = null;
+        var k_biases: ?c.mlx_array = null;
+        var v_scales: ?c.mlx_array = null;
+        var v_biases: ?c.mlx_array = null;
+        var o_scales: ?c.mlx_array = null;
+        var o_biases: ?c.mlx_array = null;
+
+        if (config.quantization) |qconfig| {
+            quants = .{ qconfig.group_size, qconfig.bits };
+            q_scales = c.mlx_array_new();
+            q_biases = c.mlx_array_new();
+            k_scales = c.mlx_array_new();
+            k_biases = c.mlx_array_new();
+            v_scales = c.mlx_array_new();
+            v_biases = c.mlx_array_new();
+            o_scales = c.mlx_array_new();
+            o_biases = c.mlx_array_new();
+        }
+
         return Attention{
             .q_proj = c.mlx_array_new(),
             .k_proj = c.mlx_array_new(),
             .v_proj = c.mlx_array_new(),
             .o_proj = c.mlx_array_new(),
+            .q_scales = q_scales,
+            .q_biases = q_biases,
+            .k_scales = k_scales,
+            .k_biases = k_biases,
+            .v_scales = v_scales,
+            .v_biases = v_biases,
+            .o_scales = o_scales,
+            .o_biases = o_biases,
+            .quants = quants,
             .n_heads = n_heads,
             .n_kv_heads = n_kv_heads,
             .head_dim = head_dim,
@@ -209,14 +348,20 @@ pub const Attention = struct {
     }
 
     pub fn load(self: *Attention, weights_map: *const c.mlx_map_string_to_array) !void {
-        try loadWeight(&self.q_proj, "q_proj.weight", self.prefix, weights_map, self.allocator);
-        try loadWeight(&self.k_proj, "k_proj.weight", self.prefix, weights_map, self.allocator);
-        try loadWeight(&self.v_proj, "v_proj.weight", self.prefix, weights_map, self.allocator);
-        try loadWeight(&self.o_proj, "o_proj.weight", self.prefix, weights_map, self.allocator);
+        if (self.quants != null) {
+            try loadQuantized(&self.q_proj, &self.q_scales.?, &self.q_biases.?, "q_proj", self.prefix, weights_map, self.allocator);
+            try loadQuantized(&self.k_proj, &self.k_scales.?, &self.k_biases.?, "k_proj", self.prefix, weights_map, self.allocator);
+            try loadQuantized(&self.v_proj, &self.v_scales.?, &self.v_biases.?, "v_proj", self.prefix, weights_map, self.allocator);
+            try loadQuantized(&self.o_proj, &self.o_scales.?, &self.o_biases.?, "o_proj", self.prefix, weights_map, self.allocator);
+        } else {
+            try loadWeight(&self.q_proj, "q_proj", self.prefix, weights_map, self.allocator);
+            try loadWeight(&self.k_proj, "k_proj", self.prefix, weights_map, self.allocator);
+            try loadWeight(&self.v_proj, "v_proj", self.prefix, weights_map, self.allocator);
+            try loadWeight(&self.o_proj, "o_proj", self.prefix, weights_map, self.allocator);
+        }
     }
 
     pub fn forward(self: *Attention, result: *c.mlx_array, x: c.mlx_array, mask: ?c.mlx_array, cache: ?*KVCache, offset: c_int) !void {
-        const input_dtype = c.mlx_array_dtype(x);
         var q = c.mlx_array_new();
         var k = c.mlx_array_new();
         var v = c.mlx_array_new();
@@ -227,9 +372,15 @@ pub const Attention = struct {
             _ = c.mlx_array_free(v);
             _ = c.mlx_array_free(w);
         }
-        try einsum(&q, .{ x, self.q_proj }, "b l d, f d -> b l f", self.stream);
-        try einsum(&k, .{ x, self.k_proj }, "b l d, f d -> b l f", self.stream);
-        try einsum(&v, .{ x, self.v_proj }, "b l d, f d -> b l f", self.stream);
+        if (self.quants) |qconfig| {
+            try mlxOp(c.mlx_quantized_matmul(&q, x, self.q_proj, self.q_scales.?, self.q_biases.?, true, qconfig[0], qconfig[1], self.stream));
+            try mlxOp(c.mlx_quantized_matmul(&k, x, self.k_proj, self.k_scales.?, self.k_biases.?, true, qconfig[0], qconfig[1], self.stream));
+            try mlxOp(c.mlx_quantized_matmul(&v, x, self.v_proj, self.v_scales.?, self.v_biases.?, true, qconfig[0], qconfig[1], self.stream));
+        } else {
+            try einsum(&q, .{ x, self.q_proj }, "b l d, f d -> b l f", self.stream);
+            try einsum(&k, .{ x, self.k_proj }, "b l d, f d -> b l f", self.stream);
+            try einsum(&v, .{ x, self.v_proj }, "b l d, f d -> b l f", self.stream);
+        }
         try reshap(&q, q, "b l (h d) -> b l h d", .{ .h = self.n_heads, .d = self.head_dim }, self.stream);
         try reshap(&k, k, "b l (h d) -> b l h d", .{ .h = self.n_kv_heads, .d = self.head_dim }, self.stream);
         try reshap(&v, v, "b l (h d) -> b l h d", .{ .h = self.n_kv_heads, .d = self.head_dim }, self.stream);
@@ -245,6 +396,7 @@ pub const Attention = struct {
         try repeat(&k, k, "b h l d -> b (repeat h) l d", .{ .repeat = self.n_repeat }, self.stream);
         try repeat(&v, v, "b h l d -> b (repeat h) l d", .{ .repeat = self.n_repeat }, self.stream);
         try einsum(&w, .{ q, k }, "b h l d, b h k d -> b h l k", self.stream);
+
         if (mask) |mask_val| {
             try mlxOp(c.mlx_add(&w, w, mask_val, self.stream));
         }
@@ -252,8 +404,11 @@ pub const Attention = struct {
         try einsum(&w, .{ w, v }, "b h l k, b h k d -> b h l d", self.stream);
         try einsum(&w, .{w}, "b h l d -> b l h d", self.stream);
         try reshap(&w, w, "b l h d -> b l (h d)", .{}, self.stream);
-        try einsum(&w, .{ w, self.o_proj }, "b l f, d f -> b l d", self.stream);
-        try mlxOp(c.mlx_astype(result, w, input_dtype, self.stream));
+        if (self.quants) |qconfig| {
+            try mlxOp(c.mlx_quantized_matmul(result, w, self.o_proj, self.o_scales.?, self.o_biases.?, true, qconfig[0], qconfig[1], self.stream));
+        } else {
+            try einsum(result, .{ w, self.o_proj }, "b l f, d f -> b l d", self.stream);
+        }
     }
 
     pub fn deinit(self: *Attention) void {
@@ -262,6 +417,18 @@ pub const Attention = struct {
         _ = c.mlx_array_free(self.v_proj);
         _ = c.mlx_array_free(self.o_proj);
         _ = c.mlx_array_free(self.scale_array);
+
+        if (self.quants != null) {
+            _ = c.mlx_array_free(self.q_scales.?);
+            _ = c.mlx_array_free(self.q_biases.?);
+            _ = c.mlx_array_free(self.k_scales.?);
+            _ = c.mlx_array_free(self.k_biases.?);
+            _ = c.mlx_array_free(self.v_scales.?);
+            _ = c.mlx_array_free(self.v_biases.?);
+            _ = c.mlx_array_free(self.o_scales.?);
+            _ = c.mlx_array_free(self.o_biases.?);
+        }
+
         self.rope.deinit();
         self.allocator.free(self.prefix);
     }
@@ -344,6 +511,7 @@ pub const Cache = struct {
 
 pub const Llama3RoPE = struct {
     freqs: c.mlx_array,
+    rope_base: c.mlx_optional_float,
     dims: c_int,
     traditional: bool,
     max_position_embeddings: c_int,
@@ -412,6 +580,7 @@ pub const Llama3RoPE = struct {
         try mlxOp(c.mlx_where(&freqs, mid_freq_mask, mid_freq, high_freq, stream));
         return Llama3RoPE{
             .freqs = freqs,
+            .rope_base = c.mlx_optional_float{ .has_value = false, .value = 0.0 },
             .dims = dims,
             .traditional = traditional,
             .max_position_embeddings = max_position_embeddings,
@@ -420,8 +589,8 @@ pub const Llama3RoPE = struct {
     }
 
     pub fn forward(self: *Llama3RoPE, result: *c.mlx_array, x: c.mlx_array, offset: c_int) !void {
-        const rope_base = c.mlx_optional_float{ .has_value = false, .value = 0.0 };
-        try mlxOp(c.mlx_fast_rope(result, x, self.dims, self.traditional, rope_base, 1.0, offset, self.freqs, self.stream));
+        try mlxOp(c.mlx_fast_rope(result, x, self.dims, self.traditional, self.rope_base, 1.0, offset, self.freqs, self.stream));
+        try mlxOp(c.mlx_astype(result, result.*, c.MLX_BFLOAT16, self.stream));
     }
 
     pub fn deinit(self: *Llama3RoPE) void {
@@ -437,12 +606,11 @@ pub const TransformerBlock = struct {
     stream: c.mlx_stream,
     allocator: std.mem.Allocator,
     prefix: []const u8,
-
     pub fn init(allocator: std.mem.Allocator, parent_prefix: []const u8, layer_idx: usize, config: *const LlamaConfig, stream: c.mlx_stream) !TransformerBlock {
         const prefix = try joinPath(allocator, parent_prefix, layer_idx);
         errdefer allocator.free(prefix);
         const attention = try Attention.init(allocator, prefix, "self_attn", config.num_attention_heads, config.num_key_value_heads, config.head_dim, config, stream);
-        const mlp = try MLP.init(allocator, prefix, "mlp", stream);
+        const mlp = try MLP.init(allocator, prefix, "mlp", config, stream);
         const input_layernorm = try RMSNorm.init(allocator, prefix, "input_layernorm", config.rms_norm_eps, stream);
         const post_attention_layernorm = try RMSNorm.init(allocator, prefix, "post_attention_layernorm", config.rms_norm_eps, stream);
         return TransformerBlock{
@@ -497,7 +665,7 @@ pub const LlamaModel = struct {
 
     pub fn init(allocator: std.mem.Allocator, parent_prefix: []const u8, config: *const LlamaConfig, stream: c.mlx_stream) !LlamaModel {
         const prefix = try allocator.dupe(u8, parent_prefix);
-        const embed_tokens = try Embedding.init(allocator, prefix, stream);
+        const embed_tokens = try Embedding.init(allocator, prefix, config, stream);
         const norm = try RMSNorm.init(allocator, prefix, "norm", config.rms_norm_eps, stream);
         const layers = try allocator.alloc(TransformerBlock, @intCast(config.num_hidden_layers));
         const layers_prefix = try joinPath(allocator, prefix, "layers");
@@ -561,7 +729,7 @@ pub const Llama = struct {
         const model = try LlamaModel.init(allocator, "model", config, stream);
         var lm_head: ?Linear = null;
         if (!config.tie_word_embeddings) {
-            lm_head = try Linear.init(allocator, "", "lm_head", stream);
+            lm_head = try Linear.init(allocator, "", "lm_head", config, stream);
         }
         return Llama{
             .model = model,
@@ -603,17 +771,23 @@ pub const DefaultTransformer = struct {
     stream: c.mlx_stream,
     model: Llama,
 
-    pub fn init(allocator: std.mem.Allocator, model_path: ?[]const u8) !DefaultTransformer {
+    pub fn init(allocator: std.mem.Allocator, model_path: []const u8) !DefaultTransformer {
         const stream = c.mlx_default_cpu_stream_new();
-        const filename = model_path orelse "model.safetensors";
-        const file = c.fopen(filename.ptr, "rb") orelse return error.FileNotFound;
+        const path_model = try std.fmt.allocPrint(allocator, "{s}/model.safetensors", .{model_path});
+        defer allocator.free(path_model);
+        const path_config = try std.fmt.allocPrint(allocator, "{s}/config.json", .{model_path});
+        defer allocator.free(path_config);
+        const file = c.fopen(path_model.ptr, "rb") orelse return error.FileNotFound;
         defer _ = c.fclose(file);
         var weights = c.mlx_map_string_to_array_new();
         defer _ = c.mlx_map_string_to_array_free(weights);
         var meta = c.mlx_map_string_to_string_new();
         defer _ = c.mlx_map_string_to_string_free(meta);
         try mlxOp(c.mlx_load_safetensors_file(&weights, &meta, file, stream));
-        var model = try Llama.init(allocator, &LlamaConfig{}, stream);
+        try printMap("Metadata", &meta);
+        var configJson = try loadJsonFile(LlamaConfig, allocator, path_config, true);
+        defer configJson.deinit();
+        var model = try Llama.init(allocator, &configJson.value, stream);
         try model.load(&weights);
         return DefaultTransformer{
             .allocator = allocator,
@@ -653,11 +827,16 @@ pub const DefaultTransformer = struct {
     }
 };
 
+const QuantConfig = struct {
+    group_size: c_int = 64,
+    bits: c_int = 4,
+};
+
 const RopeScalingConfig = struct {
-    factor: f32,
-    high_freq_factor: f32,
-    low_freq_factor: f32,
-    original_max_position_embeddings: c_int,
+    factor: f32 = 32.0,
+    high_freq_factor: f32 = 4.0,
+    low_freq_factor: f32 = 1.0,
+    original_max_position_embeddings: c_int = 8192,
 };
 
 const LlamaConfig = struct {
@@ -669,17 +848,13 @@ const LlamaConfig = struct {
     max_position_embeddings: c_int = 131072,
     rms_norm_eps: f32 = 1e-5,
     rope_theta: f32 = 500000.0,
-    rope_scaling: RopeScalingConfig = .{
-        .factor = 32.0,
-        .high_freq_factor = 4.0,
-        .low_freq_factor = 1.0,
-        .original_max_position_embeddings = 8192,
-    },
+    rope_scaling: RopeScalingConfig = .{},
     mlp_bias: bool = false,
     attention_bias: bool = false,
     tie_word_embeddings: bool = true,
     vocab_size: c_int = 128256,
     num_hidden_layers: c_int = 16,
+    quantization: ?QuantConfig = null,
 };
 
 fn mlxOp(result: c_int) !void {
@@ -701,6 +876,15 @@ fn printArray(msg: []const u8, arr: c.mlx_array) void {
     std.debug.print("]\n", .{});
 }
 
+fn printMap(msg: []const u8, map: *c.mlx_map_string_to_string) !void {
+    const map_iter = c.mlx_map_string_to_string_iterator_new(map.*);
+    defer _ = c.mlx_map_string_to_string_iterator_free(map_iter);
+    var key: [*c]const u8 = undefined;
+    var value: [*c]const u8 = undefined;
+    std.debug.print("{s}:\n", .{msg});
+    while (c.mlx_map_string_to_string_iterator_next(&key, &value, map_iter) == 0) std.debug.print("  {s}: {s}\n", .{ key, value });
+}
+
 fn createCausalMask(result: *c.mlx_array, seq_len: c_int, offset: c_int, stream: c.mlx_stream) !void {
     const zero = c.mlx_array_new_float(0.0);
     const neg_inf = c.mlx_array_new_float(-std.math.inf(f32));
@@ -713,6 +897,75 @@ fn createCausalMask(result: *c.mlx_array, seq_len: c_int, offset: c_int, stream:
     try mlxOp(c.mlx_ones(&mask, &[_]c_int{ seq_len, seq_len + offset }, 2, c.MLX_INT32, stream));
     try mlxOp(c.mlx_tril(&mask, mask, offset, stream));
     try mlxOp(c.mlx_where(result, mask, zero, neg_inf, stream));
+    try mlxOp(c.mlx_astype(result, result.*, c.MLX_BFLOAT16, stream));
+}
+
+pub fn loadJsonFile(comptime T: type, allocator: std.mem.Allocator, filename: []const u8, verbose: bool) !std.json.Parsed(T) {
+    const content = try std.fs.cwd().readFileAlloc(allocator, filename, 10 * 1024 * 1024);
+    defer allocator.free(content);
+    return try loadJsonString(T, allocator, content, verbose);
+}
+
+fn loadJsonString(comptime T: type, allocator: std.mem.Allocator, json_string: []const u8, verbose: bool) !std.json.Parsed(T) {
+    const parsed = try std.json.parseFromSlice(T, allocator, json_string, .{
+        .ignore_unknown_fields = true,
+    });
+    if (verbose) {
+        try printFieldDifferences(T, allocator, json_string);
+        try printParsedValue(T, parsed.value, allocator);
+    }
+    return parsed;
+}
+
+fn printParsedValue(comptime T: type, value: T, allocator: std.mem.Allocator) !void {
+    var string = std.ArrayList(u8).init(allocator);
+    defer string.deinit();
+    try std.json.stringify(value, .{ .whitespace = .indent_2 }, string.writer());
+    std.debug.print("\nParsed Value:\n", .{});
+    std.debug.print("{s}\n", .{string.items});
+}
+
+fn printFieldDifferences(comptime T: type, allocator: std.mem.Allocator, json_string: []const u8) !void {
+    const struct_info = @typeInfo(T).Struct;
+    var generic = try std.json.parseFromSlice(std.json.Value, allocator, json_string, .{});
+    defer generic.deinit();
+    if (generic.value != .object) return;
+    std.debug.print("Ignored fields:\n", .{});
+    {
+        var found_extra = false;
+        var iter = generic.value.object.iterator();
+        while (iter.next()) |entry| {
+            const field_exists = blk: {
+                inline for (struct_info.fields) |field| {
+                    if (std.mem.eql(u8, field.name, entry.key_ptr.*)) {
+                        break :blk true;
+                    }
+                }
+                break :blk false;
+            };
+
+            if (!field_exists) {
+                found_extra = true;
+                std.debug.print("  - {s}\n", .{entry.key_ptr.*});
+            }
+        }
+        if (!found_extra) {
+            std.debug.print("  None\n", .{});
+        }
+    }
+    std.debug.print("Default fields:\n", .{});
+    {
+        var found_missing = false;
+        inline for (struct_info.fields) |field| {
+            if (!generic.value.object.contains(field.name)) {
+                found_missing = true;
+                std.debug.print("  - {s}\n", .{field.name});
+            }
+        }
+        if (!found_missing) {
+            std.debug.print("  None\n", .{});
+        }
+    }
 }
 
 fn joinPath(allocator: std.mem.Allocator, prefix: []const u8, suffix: anytype) ![]u8 {
@@ -725,12 +978,37 @@ fn joinPath(allocator: std.mem.Allocator, prefix: []const u8, suffix: anytype) !
     return std.fmt.allocPrint(allocator, "{s}." ++ fmt, .{ prefix, suffix });
 }
 
-fn loadWeight(weight: *c.mlx_array, suffix: anytype, prefix: []const u8, weights_map: *const c.mlx_map_string_to_array, allocator: std.mem.Allocator) !void {
+fn joinPaths(allocator: std.mem.Allocator, strings: []const []const u8, separator: []const u8) ![]const u8 {
+    var result = std.ArrayList(u8).init(allocator);
+    defer result.deinit();
+    for (strings) |str| {
+        if (str.len > 0) {
+            if (result.items.len > 0) try result.appendSlice(separator);
+            try result.appendSlice(str);
+        }
+    }
+    return result.toOwnedSlice();
+}
+
+fn loadArray(weight: *c.mlx_array, suffix: anytype, prefix: []const u8, weights_map: *const c.mlx_map_string_to_array, allocator: std.mem.Allocator) !void {
     const key = try joinPath(allocator, prefix, suffix);
     defer allocator.free(key);
     try mlxOp(c.mlx_map_string_to_array_get(weight, weights_map.*, key.ptr));
     try mlxOp(c.mlx_array_eval(weight.*));
-    errdefer _ = c.mlx_array_free(weight.*);
+}
+
+fn loadWeight(weight: *c.mlx_array, suffix: anytype, prefix: []const u8, weights_map: *const c.mlx_map_string_to_array, allocator: std.mem.Allocator) !void {
+    const key = try joinPaths(allocator, &[_][]const u8{ prefix, suffix }, ".");
+    defer allocator.free(key);
+    try loadArray(weight, "weight", key, weights_map, allocator);
+}
+
+fn loadQuantized(weight: *c.mlx_array, scales: *c.mlx_array, biases: *c.mlx_array, suffix: anytype, prefix: []const u8, weights_map: *const c.mlx_map_string_to_array, allocator: std.mem.Allocator) !void {
+    const key = try joinPaths(allocator, &[_][]const u8{ prefix, suffix }, ".");
+    defer allocator.free(key);
+    try loadArray(weight, "weight", key, weights_map, allocator);
+    try loadArray(scales, "scales", key, weights_map, allocator);
+    try loadArray(biases, "biases", key, weights_map, allocator);
 }
 
 fn reshap(result: *c.mlx_array, x: c.mlx_array, pattern: []const u8, dim_values: anytype, stream: c.mlx_stream) !void {
@@ -797,7 +1075,7 @@ test "Transformer generating" {
     const allocator = gpa.allocator();
     const initial_tokens = [_]u32{ 9906, 1917 };
     const num_tokens_to_generate = 10;
-    var transformer = try DefaultTransformer.init(allocator, null);
+    var transformer = try DefaultTransformer.init(allocator, "Llama-3.2-1B-Instruct-4bit");
     defer transformer.deinit();
     const generated_tokens = try transformer.generate(&initial_tokens, num_tokens_to_generate);
     defer allocator.free(generated_tokens);

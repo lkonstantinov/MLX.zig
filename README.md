@@ -21,9 +21,7 @@ git clone https://github.com/jaco-bro/MLX.zig.git
 cd MLX.zig
 ```
 
-2. Download the [Llama-3.2-1B-Instruct model weights](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct/blob/main/model.safetensors) (2.47GB) and place it in the project root directory.
-
-3. Build and run the example demo:
+2. Build and run the example demo:
 ```
 zig build run
 ```
@@ -43,34 +41,38 @@ You are a helpful assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>
 
 Hello world<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
-Output: Hello! It's nice to meet you. Is there something I can help you with or would you
+Output: Hello World!
+
+This is the classic first program written
 ```
 
 </details>
+
+*This example demonstrates the use of quantized models to significantly reduce memory usage. A Llama 3.2 model originally sized at 2.67GB (bfloat16) is compressed to under 700MB, enabling efficient performance on resource-constrained systems.*
 
 ## Examples
 
 ```zig
 // Load tokenizer
-var tokenizer = try Tokenizer.init(allocator, null);
+var tokenizer = try Tokenizer.init(allocator, model_name);
 defer tokenizer.deinit();
 
 // Load transformer
-var transformer = try Transformer.init(allocator, null);
+var transformer = try Transformer.init(allocator, model_name);
 defer transformer.deinit();
 
 // Encode input string to token IDs (chat format)
-const input_ids = try tokenizer.encodeChat(allocator, "You are a helpful assistant.", user_input);
+const input_ids = try tokenizer.encodeChat(null, sys_prompt, user_input);
 defer allocator.free(input_ids);
 
 // Generate new tokens
-const output_ids = try transformer.generate(input_ids, num_tokens_to_generate);
+const output_ids = try transformer.generate(input_ids, n_toks);
 defer allocator.free(output_ids);
 ```
 
 ## Acknowledgements
 
-This project's build system is based on Erik Kaunismäki's [zig-build-mlx](https://github.com/ErikKaum/zig-build-mlx), which pioneered the approach of building MLX directly with Zig rather than using CMake. This project uses a condensed version of Erik's build configuration.
+This project's build system is based on Erik Kaunismäki's [zig-build-mlx](https://github.com/ErikKaum/zig-build-mlx).
 
 ## License
 
