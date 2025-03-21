@@ -17,12 +17,11 @@ const Transformer = @import("transformer.zig").DefaultTransformer;
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
+    defer _ = gpa.deinit();
 
-    // Variables
     const model_name = "Llama-3.2-1B-Instruct-4bit";
     const sys_prompt = "You are a helpful assistant.";
-    const user_input = "Hello world";
-    const num_tokens = 10;
+    const num_tokens = 100;
 
     // Download model files
     try download(allocator, model_name);
@@ -35,10 +34,18 @@ pub fn main() !void {
     var transformer = try Transformer.init(allocator, model_name);
     defer transformer.deinit();
 
+    // Prompt user for input
+    const stdin = std.io.getStdIn().reader();
+    std.debug.print("\n\n===============\n\nEnter your message: ", .{});
+    var input_buffer: [1024]u8 = undefined;
+    const input_slice = try stdin.readUntilDelimiterOrEof(&input_buffer, '\n') orelse "";
+    const user_input = try allocator.dupe(u8, input_slice);
+    defer allocator.free(user_input);
+
     // Encode input string to token IDs (chat format)
     const input_ids = try tokenizer.encodeChat(null, sys_prompt, user_input);
     defer allocator.free(input_ids);
-    std.debug.print("Input IDs: {any}\n\n", .{input_ids});
+    std.debug.print("\nInput IDs: {any}\n\n", .{input_ids});
 
     // Generate new token IDs
     const output_ids = try transformer.generate(input_ids, num_tokens);
@@ -50,7 +57,7 @@ pub fn main() !void {
     const output_str = try tokenizer.decode(output_ids);
     defer allocator.free(output_str);
 
-    std.debug.print("\nOutput IDs: {any}\n\nInput: {s}Output: {s}", .{ output_ids, input_str, output_str });
+    std.debug.print("\nOutput IDs: {any}\n\nInput: {s}Output: {s}\n", .{ output_ids, input_str, output_str });
 }
 
 test "Llama-3.2-1B-Instruct-4bit chat" {

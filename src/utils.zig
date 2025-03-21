@@ -24,9 +24,7 @@ fn mkdir(dir: []const u8) !void {
 }
 
 fn fileExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch {
-        return false;
-    };
+    std.fs.cwd().access(path, .{}) catch return false;
     return true;
 }
 
@@ -53,7 +51,6 @@ pub fn download(allocator: std.mem.Allocator, model_name: []const u8) !void {
     for (filenames) |filename| {
         const local_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ model_name, filename });
         try paths_to_free.append(local_path);
-
         if (fileExists(local_path)) {
             std.debug.print("File '{s}' already exists. Skipping download.\n", .{local_path});
         } else {

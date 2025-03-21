@@ -16,10 +16,12 @@ const pcre2 = @cImport({
 });
 
 pub const Regex = struct {
+    const Self = @This();
+
     pattern: ?*pcre2.pcre2_code_8,
     match_data: ?*pcre2.pcre2_match_data_8,
 
-    pub fn init(pattern_str: []const u8) !Regex {
+    pub fn init(pattern_str: []const u8) !Self {
         var error_code: c_int = undefined;
         var error_offset: usize = undefined;
         const options = pcre2.PCRE2_UTF | pcre2.PCRE2_UCP;
@@ -35,13 +37,13 @@ pub const Regex = struct {
             pcre2.pcre2_code_free_8(pattern);
             return error.MatchDataCreationFailed;
         }
-        return Regex{
+        return Self{
             .pattern = pattern,
             .match_data = match_data,
         };
     }
 
-    pub fn deinit(self: *Regex) void {
+    pub fn deinit(self: *Self) void {
         if (self.match_data) |md| {
             pcre2.pcre2_match_data_free_8(md);
             self.match_data = null;
@@ -52,20 +54,16 @@ pub const Regex = struct {
         }
     }
 
-    pub fn match(self: *const Regex, text: []const u8, start_pos: usize) !?struct { start: usize, end: usize } {
+    pub fn match(self: *Self, text: []const u8, start_pos: usize) !?struct { start: usize, end: usize } {
         const rc = pcre2.pcre2_match_8(self.pattern, text.ptr, text.len, start_pos, 0, self.match_data, null);
         if (rc < 0) {
-            if (rc == pcre2.PCRE2_ERROR_NOMATCH) {
-                return null;
-            }
+            if (rc == pcre2.PCRE2_ERROR_NOMATCH) return null;
             return error.MatchingError;
         }
         const ovector = pcre2.pcre2_get_ovector_pointer_8(self.match_data);
         const match_start = ovector[0];
         const match_end = ovector[1];
-        if (match_end <= match_start) {
-            return null;
-        }
+        if (match_end <= match_start) return null;
         return .{ .start = match_start, .end = match_end };
     }
 };

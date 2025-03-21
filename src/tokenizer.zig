@@ -13,6 +13,8 @@ const std = @import("std");
 const Regex = @import("regex.zig").Regex;
 
 pub const Tokenizer = struct {
+    const Self = @This();
+
     allocator: std.mem.Allocator,
     pattern_regex: Regex,
     special_regex: ?Regex,
@@ -20,7 +22,7 @@ pub const Tokenizer = struct {
     id_to_token: std.AutoHashMap(u32, []const u8),
     specials: []const []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, path_json: []const u8) !Tokenizer {
+    pub fn init(allocator: std.mem.Allocator, path_json: []const u8) !Self {
         const json_path = try std.fmt.allocPrint(allocator, "{s}/tokenizer.json", .{path_json});
         defer allocator.free(json_path);
         const json_content = try std.fs.cwd().readFileAlloc(allocator, json_path, 100 * 1024 * 1024);
@@ -85,7 +87,7 @@ pub const Tokenizer = struct {
         }
         const specials = try allocator.dupe([]const u8, special_tokens.items);
         const special_regex = try createSpecialRegex(allocator, specials);
-        return Tokenizer{
+        return Self{
             .allocator = allocator,
             .pattern_regex = pattern_regex,
             .special_regex = special_regex,
@@ -95,7 +97,7 @@ pub const Tokenizer = struct {
         };
     }
 
-    pub fn initFromTikToken(allocator: std.mem.Allocator, pattern: []const u8, vocabulary_path: []const u8, specials: []const []const u8) !Tokenizer {
+    pub fn initFromTikToken(allocator: std.mem.Allocator, pattern: []const u8, vocabulary_path: []const u8, specials: []const []const u8) !Self {
         var pattern_regex = try Regex.init(pattern);
         errdefer pattern_regex.deinit();
         var vocab = std.StringHashMap(u32).init(allocator);
@@ -128,7 +130,7 @@ pub const Tokenizer = struct {
             try id_to_token.put(rank, token);
         }
         const special_regex = try createSpecialRegex(allocator, specials);
-        return Tokenizer{
+        return Self{
             .allocator = allocator,
             .pattern_regex = pattern_regex,
             .special_regex = special_regex,
@@ -138,7 +140,7 @@ pub const Tokenizer = struct {
         };
     }
 
-    pub fn deinit(self: *Tokenizer) void {
+    pub fn deinit(self: *Self) void {
         var it = self.vocab.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -152,7 +154,7 @@ pub const Tokenizer = struct {
         self.allocator.destroy(self);
     }
 
-    fn loadVocabulary(self: *Tokenizer, path: []const u8) !void {
+    fn loadVocabulary(self: *Self, path: []const u8) !void {
         const file = try std.fs.cwd().openFile(path, .{});
         defer file.close();
         var buf_reader = std.io.bufferedReader(file.reader());
@@ -195,9 +197,7 @@ pub const Tokenizer = struct {
                 first = false;
             }
             for (special) |char| {
-                if (std.mem.indexOfScalar(u8, "\\^$.|?*+()[{", char) != null) {
-                    try pattern.append('\\');
-                }
+                if (std.mem.indexOfScalar(u8, "\\^$.|?*+()[{", char) != null) try pattern.append('\\');
                 try pattern.append(char);
             }
         }
@@ -205,7 +205,7 @@ pub const Tokenizer = struct {
         return try Regex.init(pattern.items);
     }
 
-    fn splitWithSpecials(self: *const Tokenizer, text: []const u8) !std.ArrayList([]const u8) {
+    fn splitWithSpecials(self: *Self, text: []const u8) !std.ArrayList([]const u8) {
         var result = std.ArrayList([]const u8).init(self.allocator);
         errdefer {
             for (result.items) |item| {
@@ -221,9 +221,7 @@ pub const Tokenizer = struct {
         var start: usize = 0;
         while (start < text.len) {
             const match_result = try self.special_regex.?.match(text, start);
-            if (match_result == null) {
-                break;
-            }
+            if (match_result == null) break;
             const match = match_result.?;
             if (match.start > last_end) {
                 const non_match = try self.allocator.dupe(u8, text[last_end..match.start]);
@@ -241,7 +239,7 @@ pub const Tokenizer = struct {
         return result;
     }
 
-    fn splitWithPattern(self: *const Tokenizer, text: []const u8) !std.ArrayList([]const u8) {
+    fn splitWithPattern(self: *Self, text: []const u8) !std.ArrayList([]const u8) {
         var result = std.ArrayList([]const u8).init(self.allocator);
         errdefer {
             for (result.items) |item| {
@@ -268,16 +266,14 @@ pub const Tokenizer = struct {
         return result;
     }
 
-    fn bpeMerges(self: *Tokenizer, token: []const u8) !std.ArrayList(u32) {
+    fn bpeMerges(self: *Self, token: []const u8) !std.ArrayList(u32) {
         var result = std.ArrayList(u32).init(self.allocator);
         errdefer result.deinit();
         if (self.vocab.get(token)) |id| {
             try result.append(id);
             return result;
         }
-        if (token.len == 0) {
-            return result;
-        }
+        if (token.len == 0) return result;
         var boundaries = std.ArrayList(usize).init(self.allocator);
         defer boundaries.deinit();
         try boundaries.append(0);
@@ -320,7 +316,7 @@ pub const Tokenizer = struct {
         return result;
     }
 
-    pub fn encode(self: *Tokenizer, text: []const u8) ![]const u32 {
+    pub fn encode(self: *Self, text: []const u8) ![]const u32 {
         var result = std.ArrayList(u32).init(self.allocator);
         errdefer result.deinit();
         var parts = try self.splitWithSpecials(text);
@@ -351,7 +347,7 @@ pub const Tokenizer = struct {
         return result.toOwnedSlice();
     }
 
-    pub fn decode(self: *Tokenizer, token_ids: []const u32) ![]const u8 {
+    pub fn decode(self: *Self, token_ids: []const u32) ![]const u8 {
         var result = std.ArrayList(u8).init(self.allocator);
         errdefer result.deinit();
         for (token_ids) |id| {
@@ -364,7 +360,7 @@ pub const Tokenizer = struct {
         return result.toOwnedSlice();
     }
 
-    pub fn encodeChat(self: *Tokenizer, comptime chat_format: ?[]const u8, system_message: []const u8, user_message: []const u8) ![]const u32 {
+    pub fn encodeChat(self: *Self, comptime chat_format: ?[]const u8, system_message: []const u8, user_message: []const u8) ![]const u32 {
         const format = chat_format orelse
             \\<|begin_of_text|><|start_header_id|>system<|end_header_id|>
             \\
