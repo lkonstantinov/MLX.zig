@@ -23,13 +23,9 @@ pub const MapStrArr = C.mlx_map_string_to_array;
 pub const MapStrStr = C.mlx_map_string_to_string;
 pub const OptionalFloat = C.mlx_optional_float;
 pub const defaultCpuStreamNew = C.mlx_default_cpu_stream_new;
-pub const streamFree = C.mlx_stream_free;
 pub const arrayNew = C.mlx_array_new;
-pub const arrayFree = C.mlx_array_free;
 pub const arrayDim = C.mlx_array_dim;
 pub const arrayShape = C.mlx_array_shape;
-pub const fastRope = C.mlx_fast_rope;
-pub const arange = C.mlx_arange;
 pub const neg_inf_f32 = float(-std.math.inf(f32));
 pub const pos_inf_f32 = float(std.math.inf(f32));
 pub const PI = float(std.math.pi);
@@ -215,6 +211,22 @@ pub fn argmax(result: *C.mlx_array, x: anytype, axis: c_int, keepdims: bool, str
 
 pub fn ones(result: *C.mlx_array, shape: []const c_int, dtype: C.mlx_dtype, stream: C.mlx_stream) !void {
     try mlxOp(C.mlx_ones(result, shape.ptr, shape.len, dtype, stream));
+}
+
+pub fn arrayFree(arr: C.mlx_array) void {
+    _ = C.mlx_array_free(arr);
+}
+
+pub fn streamFree(stream: C.mlx_stream) void {
+    _ = C.mlx_stream_free(stream);
+}
+
+pub fn fastRope(result: *C.mlx_array, x: C.mlx_array, dims: c_int, traditional: bool, base: C.mlx_optional_float, scale: f32, offset: c_int, freqs: C.mlx_array, s: C.mlx_stream) !void {
+    try mlxOp(C.mlx_fast_rope(result, x, dims, traditional, base, scale, offset, freqs, s));
+}
+
+pub fn arange(result: *C.mlx_array, start: f64, stop: f64, step: f64, dtype: C.mlx_dtype, stream: C.mlx_stream) !void {
+    try mlxOp(C.mlx_arange(result, start, stop, step, dtype, stream));
 }
 
 pub fn rmsNorm(result: *C.mlx_array, x: anytype, weight: anytype, eps: f32, stream: C.mlx_stream) !void {

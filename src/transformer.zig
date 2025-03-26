@@ -109,7 +109,7 @@ pub const RMSNorm = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        _ = mlx.arrayFree(self.weight);
+        mlx.arrayFree(self.weight);
         self.allocator.free(self.key);
     }
 };
@@ -153,9 +153,9 @@ pub const MLP = struct {
         var sigmoid = mlx.arrayNew();
         var up = mlx.arrayNew();
         defer {
-            _ = mlx.arrayFree(gate);
-            _ = mlx.arrayFree(sigmoid);
-            _ = mlx.arrayFree(up);
+            mlx.arrayFree(gate);
+            mlx.arrayFree(sigmoid);
+            mlx.arrayFree(up);
         }
         try self.gate_weight.forward(&gate, x);
         try mlx.sigmoid(&sigmoid, gate, self.stream);
@@ -234,10 +234,10 @@ pub const Attention = struct {
         var v = mlx.arrayNew();
         var w = mlx.arrayNew();
         defer {
-            _ = mlx.arrayFree(q);
-            _ = mlx.arrayFree(k);
-            _ = mlx.arrayFree(v);
-            _ = mlx.arrayFree(w);
+            mlx.arrayFree(q);
+            mlx.arrayFree(k);
+            mlx.arrayFree(v);
+            mlx.arrayFree(w);
         }
         try self.q_weight.forward(&q, x);
         try self.k_weight.forward(&k, x);
@@ -289,14 +289,14 @@ pub const Llama3RoPE = struct {
         var smooth_factors = mlx.arrayNew();
         var mid_freq = mlx.arrayNew();
         defer {
-            _ = mlx.arrayFree(wavelens);
-            _ = mlx.arrayFree(high_freq_mask);
-            _ = mlx.arrayFree(mid_freq_mask);
-            _ = mlx.arrayFree(high_freq);
-            _ = mlx.arrayFree(smooth_factors);
-            _ = mlx.arrayFree(mid_freq);
+            mlx.arrayFree(wavelens);
+            mlx.arrayFree(high_freq_mask);
+            mlx.arrayFree(mid_freq_mask);
+            mlx.arrayFree(high_freq);
+            mlx.arrayFree(smooth_factors);
+            mlx.arrayFree(mid_freq);
         }
-        try mlx.mlxOp(mlx.arange(&freqs, 0, @floatFromInt(dims), 2, mlx.DTYPE.FLOAT32, stream));
+        try mlx.arange(&freqs, 0, @floatFromInt(dims), 2, mlx.DTYPE.FLOAT32, stream);
         try mlx.divide(&freqs, freqs, mlx.float(@floatFromInt(dims)), stream);
         try mlx.power(&freqs, mlx.float(theta), freqs, stream);
         try mlx.multiply(&wavelens, mlx.float(2.0 * std.math.pi), freqs, stream);
@@ -323,12 +323,12 @@ pub const Llama3RoPE = struct {
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array, offset: c_int) !void {
-        try mlx.mlxOp(mlx.fastRope(result, x, self.dims, false, self.rope_base, 1.0, offset, self.freqs, self.stream));
+        try mlx.fastRope(result, x, self.dims, false, self.rope_base, 1.0, offset, self.freqs, self.stream);
         try mlx.astype(result, result.*, mlx.DTYPE.BFLOAT16, self.stream);
     }
 
     pub fn deinit(self: *Self) void {
-        _ = mlx.arrayFree(self.freqs);
+        mlx.arrayFree(self.freqs);
     }
 };
 
@@ -371,8 +371,8 @@ pub const TransformerBlock = struct {
         var attn = mlx.arrayNew();
         var mlp = mlx.arrayNew();
         defer {
-            _ = mlx.arrayFree(attn);
-            _ = mlx.arrayFree(mlp);
+            mlx.arrayFree(attn);
+            mlx.arrayFree(mlp);
         }
         try self.input_layernorm.forward(&attn, x);
         try self.attention.forward(&attn, attn, mask, cache, offset);
@@ -432,7 +432,7 @@ pub const LlamaModel = struct {
         const seq_len = mlx.arrayDim(toks, 1);
         const offset = if (cache) |c| c.offset else 0;
         var x = mlx.arrayNew();
-        defer _ = mlx.arrayFree(x);
+        defer mlx.arrayFree(x);
         try self.embed_tokens.forward(&x, toks);
         for (self.layers, 0..) |*layer, i| {
             const layer_cache = if (cache) |c| &c.layers[i] else null;
@@ -480,7 +480,7 @@ pub const Llama = struct {
 
     pub fn forward(self: *Self, result: *mlx.Array, toks: mlx.Array, mask: ?mlx.Array, cache: ?*mlx.Cache) !void {
         var x = mlx.arrayNew();
-        defer _ = mlx.arrayFree(x);
+        defer mlx.arrayFree(x);
         try self.model.forward(&x, toks, mask, cache);
         if (self.tie_word_embeddings) {
             try self.model.embed_tokens.asLinear(result, x);
@@ -526,7 +526,7 @@ pub const DefaultTransformer = struct {
     pub fn deinit(self: *Self) void {
         self.model.deinit();
         self.allocator.free(self.eos_token_id);
-        _ = mlx.streamFree(self.stream);
+        mlx.streamFree(self.stream);
     }
 
     pub fn generate(self: *Self, initial_tokens: []const u32, num_tokens: usize) ![]u32 {
@@ -539,9 +539,9 @@ pub const DefaultTransformer = struct {
         var mask = mlx.arrayNew();
         defer {
             cache.deinit();
-            _ = mlx.arrayFree(toks);
-            _ = mlx.arrayFree(logits);
-            _ = mlx.arrayFree(mask);
+            mlx.arrayFree(toks);
+            mlx.arrayFree(logits);
+            mlx.arrayFree(mask);
         }
         const isEosToken = struct {
             fn check(token: u32, eos_tokens: []const u32) bool {
