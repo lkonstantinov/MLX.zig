@@ -1,32 +1,11 @@
-// Copyright 2025 Joe
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//     http://www.apache.org/licenses/LICENSE-2.0
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+//! utils.zig - Utility Functions
+//!
+//! General utility functions for file operations, model downloading, and JSON
+//! parsing.
+//!
+//! Copyright 2025 Joe
 
 const std = @import("std");
-
-fn mkdir(dir: []const u8) !void {
-    std.fs.cwd().makeDir(dir) catch |err| {
-        if (err == error.PathAlreadyExists) {
-            std.debug.print("Directory '{s}' already exists.\n", .{dir});
-            return;
-        } else {
-            return err;
-        }
-    };
-    std.debug.print("Directory '{s}' created successfully.\n", .{dir});
-}
-
-fn fileExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
-    return true;
-}
 
 pub fn download(allocator: std.mem.Allocator, model_name: []const u8) !void {
     try mkdir(model_name);
@@ -84,4 +63,85 @@ pub fn download(allocator: std.mem.Allocator, model_name: []const u8) !void {
             return error.DownloadFailed;
         },
     }
+}
+
+pub fn allocJoin(allocator: std.mem.Allocator, parent: []const u8, name: anytype) ![]u8 {
+    const T = @TypeOf(name);
+    const info = @typeInfo(T);
+    const fmt = if (info == .Int or info == .ComptimeInt) ".{d}" else if (T == @TypeOf(null)) "{s}" else ".{s}";
+    return std.fmt.allocPrint(allocator, "{s}" ++ fmt, .{ parent, name });
+}
+
+pub fn loadJson(comptime T: type, allocator: std.mem.Allocator, filename: []const u8, verbose: bool) !std.json.Parsed(T) {
+    const json_string = try std.fs.cwd().readFileAlloc(allocator, filename, 10 * 1024 * 1024);
+    defer allocator.free(json_string);
+    const parsed = try std.json.parseFromSlice(T, allocator, json_string, .{
+        .ignore_unknown_fields = true,
+    });
+    if (verbose) {
+        try printFieldDifferences(T, allocator, json_string);
+        try printParsedValue(T, parsed.value, allocator);
+    }
+    return parsed;
+}
+
+fn printParsedValue(comptime T: type, value: T, allocator: std.mem.Allocator) !void {
+    var string = std.ArrayList(u8).init(allocator);
+    defer string.deinit();
+    try std.json.stringify(value, .{ .whitespace = .indent_2 }, string.writer());
+    std.debug.print("\nParsed Value:\n", .{});
+    std.debug.print("{s}\n", .{string.items});
+}
+
+fn printFieldDifferences(comptime T: type, allocator: std.mem.Allocator, json_string: []const u8) !void {
+    const struct_info = @typeInfo(T).Struct;
+    var generic = try std.json.parseFromSlice(std.json.Value, allocator, json_string, .{});
+    defer generic.deinit();
+    if (generic.value != .object) return;
+    std.debug.print("\nIgnored fields:\n", .{});
+    {
+        var found_extra = false;
+        var iter = generic.value.object.iterator();
+        while (iter.next()) |entry| {
+            const field_exists = blk: {
+                inline for (struct_info.fields) |field| {
+                    if (std.mem.eql(u8, field.name, entry.key_ptr.*)) break :blk true;
+                }
+                break :blk false;
+            };
+            if (!field_exists) {
+                found_extra = true;
+                std.debug.print("  - {s}\n", .{entry.key_ptr.*});
+            }
+        }
+        if (!found_extra) std.debug.print("  None\n", .{});
+    }
+    std.debug.print("Default fields:\n", .{});
+    {
+        var found_missing = false;
+        inline for (struct_info.fields) |field| {
+            if (!generic.value.object.contains(field.name)) {
+                found_missing = true;
+                std.debug.print("  - {s}\n", .{field.name});
+            }
+        }
+        if (!found_missing) std.debug.print("  None\n", .{});
+    }
+}
+
+fn mkdir(dir: []const u8) !void {
+    std.fs.cwd().makeDir(dir) catch |err| {
+        if (err == error.PathAlreadyExists) {
+            std.debug.print("Directory '{s}' already exists.\n", .{dir});
+            return;
+        } else {
+            return err;
+        }
+    };
+    std.debug.print("Directory '{s}' created successfully.\n", .{dir});
+}
+
+fn fileExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
 }

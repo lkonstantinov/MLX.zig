@@ -155,7 +155,7 @@ Output: I'm just a language model, I don't have emotions or feelings like humans
 
 </details>
 
-*The example uses 4-bit quantization to reduce the Llama 3.2 model size from 2.7GB (bfloat16) to under 0.7B.*
+*The example uses 4-bit quantization to reduce the Llama 3.2 model size from 2.7GB (bfloat16) to under 0.7GB.*
 
 ## Examples
 
