@@ -14,7 +14,6 @@ const pcre2 = @cImport({
 
 pub const Regex = struct {
     const Self = @This();
-
     pattern: ?*pcre2.pcre2_code_8,
     match_data: ?*pcre2.pcre2_match_data_8,
 

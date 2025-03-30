@@ -11,6 +11,86 @@
 
 const std = @import("std");
 
+pub fn build(b: *std.Build) !void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = std.builtin.OptimizeMode.ReleaseFast;
+    const options = try MLXBuildOptions.fromOptions(b);
+    const version = "0.0.0";
+    const mlx_lib = try buildMlx(b, target, optimize, options);
+    const mlx_c_lib = try buildMlxC(b, mlx_lib, target, optimize);
+    b.installArtifact(mlx_lib);
+    b.installArtifact(mlx_c_lib);
+    createPkgConfig(b, version);
+    const whisper_exe = buildExecutable(b, mlx_c_lib, target, optimize, "mlx_whisper", "src/whisper_main.zig");
+    b.installArtifact(whisper_exe);
+    const whisper_run_cmd = b.addRunArtifact(whisper_exe);
+    const whisper_run_step = b.step("run-whisper", "Run the whisper transcription app");
+    whisper_run_step.dependOn(&whisper_run_cmd.step);
+    const llama_exe = buildExecutable(b, mlx_c_lib, target, optimize, "mlx_llama", "src/llama_main.zig");
+    b.installArtifact(llama_exe);
+    const llama_run_cmd = b.addRunArtifact(llama_exe);
+    const llama_run_step = b.step("run-llama", "Run the llama chat app");
+    llama_run_step.dependOn(&llama_run_cmd.step);
+    const default_exe = buildExecutable(b, mlx_c_lib, target, optimize, "mlx_zig_exe", "src/main.zig");
+    b.installArtifact(default_exe);
+    const default_run_cmd = b.addRunArtifact(default_exe);
+    const default_run_step = b.step("run", "Run the default app");
+    default_run_step.dependOn(&default_run_cmd.step);
+    const test_exe = buildTestExecutable(b, mlx_c_lib, target, optimize);
+    const test_run = b.addRunArtifact(test_exe);
+    b.installArtifact(test_exe);
+    const test_step = b.step("test", "Run all tests");
+    test_step.dependOn(&test_run.step);
+    if (options.create_package) {
+        createDistributablePackage(b);
+    }
+    const libs_step = b.step("libs", "Build MLX and MLX-C libraries");
+    libs_step.dependOn(&mlx_lib.step);
+    libs_step.dependOn(&mlx_c_lib.step);
+}
+
+fn buildExecutable(b: *std.Build, mlx_c_lib: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, name: []const u8, source_path: []const u8) *std.Build.Step.Compile {
+    const pcre2_dep = b.dependency("pcre2", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const og_mlx_c = b.dependency("mlx-c", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const exe = b.addExecutable(.{
+        .name = name,
+        .root_source_file = b.path(source_path),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.linkLibrary(mlx_c_lib);
+    exe.linkLibrary(pcre2_dep.artifact("pcre2-8"));
+    exe.addIncludePath(og_mlx_c.path("."));
+    return exe;
+}
+
+fn buildTestExecutable(b: *std.Build, mlx_c_lib: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const pcre2_dep = b.dependency("pcre2", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const og_mlx_c = b.dependency("mlx-c", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const test_exe = b.addTest(.{
+        .name = "mlx_zig_test",
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_exe.linkLibrary(mlx_c_lib);
+    test_exe.linkLibrary(pcre2_dep.artifact("pcre2-8"));
+    test_exe.addIncludePath(og_mlx_c.path("."));
+    return test_exe;
+}
+
 const MLXBuildOptions = struct {
     build_metal: bool,
     metal_jit: bool,
@@ -167,48 +247,6 @@ fn buildMlxC(b: *std.Build, mlx_lib: *std.Build.Step.Compile, target: std.Build.
     return mlx_c_lib;
 }
 
-fn buildExecutable(b: *std.Build, mlx_c_lib: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
-    const pcre2_dep = b.dependency("pcre2", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const og_mlx_c = b.dependency("mlx-c", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const exe = b.addExecutable(.{
-        .name = "mlx_zig_exe",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    exe.linkLibrary(mlx_c_lib);
-    exe.linkLibrary(pcre2_dep.artifact("pcre2-8"));
-    exe.addIncludePath(og_mlx_c.path("."));
-    return exe;
-}
-
-fn buildTestExecutable(b: *std.Build, mlx_c_lib: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
-    const pcre2_dep = b.dependency("pcre2", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const og_mlx_c = b.dependency("mlx-c", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const test_exe = b.addTest(.{
-        .name = "mlx_zig_test",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    test_exe.linkLibrary(mlx_c_lib);
-    test_exe.linkLibrary(pcre2_dep.artifact("pcre2-8"));
-    test_exe.addIncludePath(og_mlx_c.path("."));
-    return test_exe;
-}
-
 fn createDistributablePackage(b: *std.Build) void {
     const pkg_dir = b.pathJoin(&.{ b.install_path, "mlx-c-dist" });
     const mkdir_cmd = b.addSystemCommand(&[_][]const u8{
@@ -257,34 +295,6 @@ fn createPkgConfig(b: *std.Build, version: []const u8) void {
     const write_cmd = b.addWriteFile(pc_file, pc_content);
     write_cmd.step.dependOn(&mkdir_cmd.step);
     b.getInstallStep().dependOn(&write_cmd.step);
-}
-
-pub fn build(b: *std.Build) !void {
-    const target = b.standardTargetOptions(.{});
-    const optimize = std.builtin.OptimizeMode.ReleaseFast;
-    const options = try MLXBuildOptions.fromOptions(b);
-    const version = "0.0.0";
-    const mlx_lib = try buildMlx(b, target, optimize, options);
-    const mlx_c_lib = try buildMlxC(b, mlx_lib, target, optimize);
-    b.installArtifact(mlx_lib);
-    b.installArtifact(mlx_c_lib);
-    createPkgConfig(b, version);
-    const exe = buildExecutable(b, mlx_c_lib, target, optimize);
-    b.installArtifact(exe);
-    const run_cmd = b.addRunArtifact(exe);
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
-    const test_exe = buildTestExecutable(b, mlx_c_lib, target, optimize);
-    const test_run = b.addRunArtifact(test_exe);
-    b.installArtifact(test_exe);
-    const test_step = b.step("test", "Run all tests");
-    test_step.dependOn(&test_run.step);
-    if (options.create_package) {
-        createDistributablePackage(b);
-    }
-    const libs_step = b.step("libs", "Build MLX and MLX-C libraries");
-    libs_step.dependOn(&mlx_lib.step);
-    libs_step.dependOn(&mlx_c_lib.step);
 }
 
 fn getVersionIncludes(metal_version: u32) []const u8 {

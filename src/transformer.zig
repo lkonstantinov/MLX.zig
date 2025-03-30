@@ -105,7 +105,7 @@ pub const RMSNorm = struct {
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array) !void {
-        try mlx.rmsNorm(result, x, self.weight, self.eps, self.stream);
+        try mlx.fastRmsNorm(result, x, self.weight, self.eps, self.stream);
     }
 
     pub fn deinit(self: *Self) void {
@@ -495,7 +495,7 @@ pub const Llama = struct {
     }
 };
 
-pub const DefaultTransformer = struct {
+pub const Transformer = struct {
     const Self = @This();
     allocator: std.mem.Allocator,
     stream: mlx.Stream,
@@ -533,7 +533,7 @@ pub const DefaultTransformer = struct {
         std.debug.print("\nInput IDs: {any}\n\n", .{initial_tokens});
         var output_tokens = try self.allocator.alloc(u32, num_tokens);
         errdefer self.allocator.free(output_tokens);
-        var cache = try mlx.Cache.init(self.allocator, self.model.model.layers.len);
+        var cache = try mlx.Cache.init(self.allocator, self.model.model.layers.len, 2);
         var toks = try mlx.arrayNewData(initial_tokens.ptr, .{ 1, initial_tokens.len }, mlx.DTYPE.UINT32);
         var logits = mlx.arrayNew();
         var mask = mlx.arrayNew();
@@ -620,7 +620,7 @@ test "Transformer generating" {
     const allocator = gpa.allocator();
     const initial_tokens = [_]u32{ 9906, 1917 };
     const num_tokens_to_generate = 10;
-    var transformer = try DefaultTransformer.init(allocator, "Llama-3.2-1B-Instruct-4bit");
+    var transformer = try Transformer.init(allocator, "Llama-3.2-1B-Instruct-4bit");
     defer transformer.deinit();
     const generated_tokens = try transformer.generate(&initial_tokens, num_tokens_to_generate);
     defer allocator.free(generated_tokens);

@@ -13,7 +13,6 @@ const Regex = @import("regex.zig").Regex;
 
 pub const Tokenizer = struct {
     const Self = @This();
-
     allocator: std.mem.Allocator,
     pattern_regex: Regex,
     special_regex: ?Regex,
@@ -113,6 +112,13 @@ pub const Tokenizer = struct {
             var iter = std.mem.tokenize(u8, line, " ");
             const token_b64 = iter.next() orelse continue;
             const rank_str = iter.next() orelse continue;
+            if (std.mem.eql(u8, token_b64, "=")) {
+                const token = try allocator.alloc(u8, 0);
+                const rank = try std.fmt.parseInt(u32, rank_str, 10);
+                try vocab.put(token, rank);
+                try id_to_token.put(rank, token);
+                continue;
+            }
             const decoded_size = try std.base64.standard.Decoder.calcSizeForSlice(token_b64);
             const token = try allocator.alloc(u8, decoded_size);
             errdefer allocator.free(token);
@@ -250,7 +256,6 @@ pub const Tokenizer = struct {
         while (start < text.len) {
             const match_result = try self.pattern_regex.match(text, start);
             if (match_result == null) {
-                // Handle remaining text if no match is found
                 if (start < text.len) {
                     const remaining = try self.allocator.dupe(u8, text[start..]);
                     try result.append(remaining);
@@ -378,10 +383,25 @@ pub const Tokenizer = struct {
     }
 };
 
-fn formatRange(comptime format: []const u8, comptime start: usize, comptime end: usize) [end - start][]const u8 {
+pub fn formatRange(comptime format: []const u8, comptime start: usize, comptime end: usize) [end - start][]const u8 {
     var result: [end - start][]const u8 = undefined;
     inline for (&result, 0..) |*ptr, i| {
         ptr.* = std.fmt.comptimePrint(format, .{start + i});
+    }
+    return result;
+}
+
+pub fn formatRangeFloat(comptime count: usize) [count][]const u8 {
+    var result: [count][]const u8 = undefined;
+    inline for (&result, 0..) |*ptr, i| {
+        const seconds = @as(f32, @floatFromInt(i)) * 0.02;
+        const whole = @as(u32, @intFromFloat(seconds));
+        const frac = @as(u32, @intFromFloat((seconds - @as(f32, @floatFromInt(whole))) * 100.0 + 0.5)); // +0.5 for rounding
+        if (frac < 10) {
+            ptr.* = std.fmt.comptimePrint("<|{d}.0{d}|>", .{ whole, frac });
+        } else {
+            ptr.* = std.fmt.comptimePrint("<|{d}.{d}|>", .{ whole, frac });
+        }
     }
     return result;
 }
