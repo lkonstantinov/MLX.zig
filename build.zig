@@ -21,13 +21,14 @@ pub fn build(b: *std.Build) !void {
         make_cmd.step.dependOn(&cmake_cmd.step);
         install_step.dependOn(&make_cmd.step);
     }
+    b.getInstallStep().dependOn(install_step);
     const pcre2_dep = b.dependency("pcre2", .{
         .target = target,
         .optimize = optimize,
     });
-    const whisper_exe = buildExe(b, "mlx_whisper", "src/whisper_main.zig", mlx_c_path, mlx_c_build_path, pcre2_dep, target, optimize);
-    const llama_exe = buildExe(b, "mlx_llama", "src/llama_main.zig", mlx_c_path, mlx_c_build_path, pcre2_dep, target, optimize);
-    const default_exe = buildExe(b, "mlx_zig_exe", "src/main.zig", mlx_c_path, mlx_c_build_path, pcre2_dep, target, optimize);
+    const whisper_exe = buildExe(b, "mlx_whisper", "src/whisper_main.zig", mlx_c_path, mlx_c_build_path, pcre2_dep, target, optimize, install_step);
+    const llama_exe = buildExe(b, "mlx_llama", "src/llama_main.zig", mlx_c_path, mlx_c_build_path, pcre2_dep, target, optimize, install_step);
+    const default_exe = buildExe(b, "mlx_zig_exe", "src/main.zig", mlx_c_path, mlx_c_build_path, pcre2_dep, target, optimize, install_step);
     const whisper_run = b.addRunArtifact(whisper_exe);
     const whisper_step = b.step("run-whisper", "Run whisper transcription");
     whisper_step.dependOn(&whisper_run.step);
@@ -42,6 +43,7 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    test_exe.step.dependOn(install_step);
     configureExecutable(test_exe, b, mlx_c_path, mlx_c_build_path, pcre2_dep);
     const test_run = b.addRunArtifact(test_exe);
     const test_step = b.step("test", "Run tests");
@@ -64,6 +66,7 @@ fn buildExe(
     pcre2_dep: *std.Build.Dependency,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    install_step: *std.Build.Step,
 ) *std.Build.Step.Compile {
     const exe = b.addExecutable(.{
         .name = name,
@@ -71,6 +74,7 @@ fn buildExe(
         .target = target,
         .optimize = optimize,
     });
+    exe.step.dependOn(install_step);
     configureExecutable(exe, b, mlx_c_path, mlx_c_build_path, pcre2_dep);
     b.installArtifact(exe);
     return exe;
