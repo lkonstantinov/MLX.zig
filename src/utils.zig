@@ -1,8 +1,5 @@
 //! utils.zig - Utility Functions
 //!
-//! General utility functions for file operations, model downloading, and JSON
-//! parsing.
-//!
 //! Copyright 2025 Joe
 
 const std = @import("std");

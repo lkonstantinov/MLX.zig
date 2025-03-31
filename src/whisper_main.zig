@@ -1,8 +1,4 @@
-//! whisper_main.zig - Whisper Transcription Interface
-//!
-//! Entry point for the Whisper speech-to-text model application. Manages the
-//! model download process, initializes the transcriber component, and
-//! handles audio file transcription.
+//! whisper_main.zig - Entry point for the Whisper-Turbo-Large-v3 speech-to-text app
 //!
 //! Copyright 2025 Joe
 
@@ -14,17 +10,13 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
-
     const model_name = "whisper-large-v3-turbo";
     const audio_file = "alive.mp3";
-
     try download(allocator, "openai", model_name);
     var transcriber = try Transcriber.init(allocator, model_name);
     defer transcriber.deinit();
-
     const transcription = try transcriber.transcribe(audio_file);
     defer allocator.free(transcription);
-
     std.debug.print("\nTranscription of {s}:{s}\n", .{ audio_file, transcription });
 }
 

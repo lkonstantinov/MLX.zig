@@ -1,8 +1,4 @@
-//! regex.zig - Regular Expression Bindings
-//!
-//! Thin wrapper around the PCRE2 C library providing regular expression
-//! functionality. Used primarily by the tokenizer for pattern matching
-//! during the tokenization process.
+//! regex.zig - Regex Bindings
 //!
 //! Copyright 2025 Joe
 

@@ -1,7 +1,5 @@
 //! main.zig - Default entry point
 //!
-//! Nothing to see here yet
-//!
 //! Copyright 2025 Joe
 
 const std = @import("std");

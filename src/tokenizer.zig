@@ -1,10 +1,4 @@
-//! tokenizer.zig - Text Tokenizer Implementation
-//!
-//! Implements text tokenization for language models, including encoding text to
-//! token IDs and decoding token IDs back to text. Supports both HuggingFace tokenizer.json
-//! format and tiktoken vocabulary format with custom regex patterns. Provides
-//! functions for BPE tokenization, vocabulary loading, and special token handling
-//! for chat formatting.
+//! tokenizer.zig - TikToken and Huggingface Tokenizer
 //!
 //! Copyright 2025 Joe
 
@@ -95,7 +89,8 @@ pub const Tokenizer = struct {
         };
     }
 
-    pub fn initFromTikToken(allocator: std.mem.Allocator, pattern: []const u8, vocabulary_path: []const u8, specials: []const []const u8) !Self {
+    pub fn initFromTikToken(allocator: std.mem.Allocator, pattern: []const u8, vocabulary_path: []const u8, specials_: []const []const u8) !Self {
+        const specials = try allocator.dupe([]const u8, specials_);
         var pattern_regex = try Regex.init(pattern);
         errdefer pattern_regex.deinit();
         var vocab = std.StringHashMap(u32).init(allocator);
@@ -156,7 +151,7 @@ pub const Tokenizer = struct {
             regex.deinit();
         }
         self.pattern_regex.deinit();
-        self.allocator.destroy(self);
+        self.allocator.free(self.specials);
     }
 
     fn loadVocabulary(self: *Self, path: []const u8) !void {

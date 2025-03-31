@@ -1,9 +1,4 @@
-//! llama_main.zig - LLM Chat Interface
-//!
-//! Entry point for the Llama language model chat application. Manages the
-//! model download process, initializes tokenizer and transformer components,
-//! handles prompt formatting, token generation, and text decoding. Provides
-//! an interactive chat interface to the model for text generation.
+//! llama_main.zig - Entry point for the Llama-3.2-Instruct chat app
 //!
 //! Copyright 2025 Joe
 

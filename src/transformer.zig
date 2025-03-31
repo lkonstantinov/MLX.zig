@@ -1,9 +1,4 @@
-//! transformer.zig - Transformer Model Implementation
-//!
-//! This module implements the Llama transformer architecture including attention
-//! mechanisms, transformer blocks, and text generation. It provides the core
-//! neural network functionality using MLX C bindings for hardware-accelerated
-//! computation on Apple Silicon.
+//! transformer.zig - Llama-3.2-Instruct
 //!
 //! Copyright 2025 Joe
 
@@ -11,108 +6,6 @@ const std = @import("std");
 const mlx = @import("mlx.zig");
 const loadJson = @import("utils.zig").loadJson;
 const allocJoin = @import("utils.zig").allocJoin;
-
-pub const Linear = struct {
-    const Self = @This();
-    key: []const u8,
-    weight: mlx.Weight,
-    stream: mlx.Stream,
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, quant_config: ?mlx.QuantConfig, stream: mlx.Stream) !Self {
-        const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
-        return Self{
-            .weight = try mlx.Weight.init(quant_config, stream),
-            .stream = stream,
-            .key = key,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.weight.load(self.key, weights_map);
-    }
-
-    pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array) !void {
-        try self.weight.forward(result, x);
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.weight.deinit();
-        self.allocator.free(self.key);
-    }
-};
-
-pub const Embedding = struct {
-    const Self = @This();
-    key: []const u8,
-    weight: mlx.Weight,
-    stream: mlx.Stream,
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, quant_config: ?mlx.QuantConfig, stream: mlx.Stream) !Self {
-        const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
-        return Self{
-            .weight = try mlx.Weight.init(quant_config, stream),
-            .stream = stream,
-            .key = key,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.weight.loadDequantized(self.key, weights_map);
-    }
-
-    pub fn forward(self: *Self, result: *mlx.Array, toks: mlx.Array) !void {
-        try mlx.take(result, self.weight.weight, toks, 0, self.stream);
-    }
-
-    pub fn asLinear(self: *Self, result: *mlx.Array, x: mlx.Array) !void {
-        try self.weight.forward(result, x);
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.weight.deinit();
-        self.allocator.free(self.key);
-    }
-};
-
-pub const RMSNorm = struct {
-    const Self = @This();
-    key: []const u8,
-    eps: f32,
-    weight: mlx.Array,
-    stream: mlx.Stream,
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, eps: f32, stream: mlx.Stream) !Self {
-        const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
-        return Self{
-            .weight = mlx.arrayNew(),
-            .eps = eps,
-            .stream = stream,
-            .key = key,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try mlx.loadArray(&self.weight, self.key, "weight", weights_map);
-    }
-
-    pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array) !void {
-        try mlx.fastRmsNorm(result, x, self.weight, self.eps, self.stream);
-    }
-
-    pub fn deinit(self: *Self) void {
-        mlx.arrayFree(self.weight);
-        self.allocator.free(self.key);
-    }
-};
 
 pub const MLP = struct {
     const Self = @This();
@@ -242,12 +135,9 @@ pub const Attention = struct {
         try self.q_weight.forward(&q, x);
         try self.k_weight.forward(&k, x);
         try self.v_weight.forward(&v, x);
-        try mlx.rEshap(&q, q, "b l (h d) -> b l h d", .{ .h = self.n_heads, .d = self.head_dim }, self.stream);
-        try mlx.rEshap(&k, k, "b l (h d) -> b l h d", .{ .h = self.n_kv_heads, .d = self.head_dim }, self.stream);
-        try mlx.rEshap(&v, v, "b l (h d) -> b l h d", .{ .h = self.n_kv_heads, .d = self.head_dim }, self.stream);
-        try mlx.einsum(&q, .{q}, "b l h d -> b h l d", self.stream);
-        try mlx.einsum(&k, .{k}, "b l h d -> b h l d", self.stream);
-        try mlx.einsum(&v, .{v}, "b l h d -> b h l d", self.stream);
+        try mlx.rEshap(&q, q, "b l (h d) -> b h l d", .{ .h = self.n_heads, .d = self.head_dim }, self.stream);
+        try mlx.rEshap(&k, k, "b l (h d) -> b h l d", .{ .h = self.n_kv_heads, .d = self.head_dim }, self.stream);
+        try mlx.rEshap(&v, v, "b l (h d) -> b h l d", .{ .h = self.n_kv_heads, .d = self.head_dim }, self.stream);
         try self.rope.forward(&q, q, offset);
         try self.rope.forward(&k, k, offset);
         try mlx.multiply(&q, q, mlx.float(self.scale), self.stream);
@@ -258,8 +148,7 @@ pub const Attention = struct {
         if (mask) |m| try mlx.add(&w, w, m, self.stream);
         try mlx.softmax(&w, w, &[_]c_int{3}, true, self.stream);
         try mlx.einsum(&w, .{ w, v }, "b h l k, b h k d -> b h l d", self.stream);
-        try mlx.einsum(&w, .{w}, "b h l d -> b l h d", self.stream);
-        try mlx.rEshap(&w, w, "b l h d -> b l (h d)", .{}, self.stream);
+        try mlx.rEshap(&w, w, "b h l d -> b l (h d)", .{}, self.stream);
         try self.o_weight.forward(result, w);
     }
 
@@ -337,8 +226,8 @@ pub const TransformerBlock = struct {
     key: []const u8,
     attention: Attention,
     mlp: MLP,
-    input_layernorm: RMSNorm,
-    post_attention_layernorm: RMSNorm,
+    input_layernorm: mlx.RMSNorm,
+    post_attention_layernorm: mlx.RMSNorm,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
 
@@ -347,8 +236,8 @@ pub const TransformerBlock = struct {
         errdefer allocator.free(key);
         const attention = try Attention.init(allocator, key, "self_attn", config.num_attention_heads, config.num_key_value_heads, config.head_dim, config.rope_theta, config.rope_scaling, config.quantization, stream);
         const mlp = try MLP.init(allocator, key, "mlp", config.quantization, stream);
-        const input_layernorm = try RMSNorm.init(allocator, key, "input_layernorm", config.rms_norm_eps, stream);
-        const post_attention_layernorm = try RMSNorm.init(allocator, key, "post_attention_layernorm", config.rms_norm_eps, stream);
+        const input_layernorm = try mlx.RMSNorm.init(allocator, key, "input_layernorm", config.rms_norm_eps, stream);
+        const post_attention_layernorm = try mlx.RMSNorm.init(allocator, key, "post_attention_layernorm", config.rms_norm_eps, stream);
         return Self{
             .attention = attention,
             .mlp = mlp,
@@ -394,16 +283,16 @@ pub const TransformerBlock = struct {
 pub const LlamaModel = struct {
     const Self = @This();
     key: []const u8,
-    embed_tokens: Embedding,
+    embed_tokens: mlx.Embedding,
     layers: []TransformerBlock,
-    norm: RMSNorm,
+    norm: mlx.RMSNorm,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, parent: []const u8, config: *const LlamaConfig, stream: mlx.Stream) !Self {
         const key = try allocator.dupe(u8, parent);
-        const embed_tokens = try Embedding.init(allocator, key, "embed_tokens", config.quantization, stream);
-        const norm = try RMSNorm.init(allocator, key, "norm", config.rms_norm_eps, stream);
+        const embed_tokens = try mlx.Embedding.init(allocator, key, "embed_tokens", config.quantization, stream);
+        const norm = try mlx.RMSNorm.init(allocator, key, "norm", config.rms_norm_eps, stream);
         const layers = try allocator.alloc(TransformerBlock, @intCast(config.num_hidden_layers));
         const layers_key = try allocJoin(allocator, key, "layers");
         defer allocator.free(layers_key);
@@ -457,13 +346,13 @@ pub const Llama = struct {
     const Self = @This();
     model: LlamaModel,
     tie_word_embeddings: bool,
-    lm_head: ?Linear,
+    lm_head: ?mlx.Linear,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, config: *const LlamaConfig, stream: mlx.Stream) !Self {
         const model = try LlamaModel.init(allocator, "model", config, stream);
-        const lm_head = if (!config.tie_word_embeddings) try Linear.init(allocator, "lm_head", "", config.quantization, stream) else null;
+        const lm_head = if (!config.tie_word_embeddings) try mlx.Linear.init(allocator, "lm_head", "", false, config.quantization, stream) else null;
         return Self{
             .model = model,
             .tie_word_embeddings = config.tie_word_embeddings,
@@ -504,7 +393,7 @@ pub const Transformer = struct {
 
     pub fn init(allocator: std.mem.Allocator, model_path: []const u8) !Self {
         var buf: [1024]u8 = undefined;
-        const stream = mlx.defaultCpuStreamNew();
+        const stream = mlx.defaultGpuStreamNew();
         const path_config = try std.fmt.bufPrintZ(&buf, "{s}/config.json", .{model_path});
         const config = try loadJson(LlamaConfig, allocator, path_config, true);
         defer config.deinit();
@@ -552,10 +441,10 @@ pub const Transformer = struct {
             }
         }.check;
         var start_time = std.time.milliTimestamp();
-        var prompt_ms: f64 = undefined;
+        var prompt_ms: f16 = undefined;
         var i: usize = 0;
         while (i < num_tokens) : (i += 1) {
-            try mlx.createCausalMask(&mask, mlx.arrayDim(toks, 1), cache.offset, self.stream);
+            try mlx.createCausalMask(&mask, mlx.arrayDim(toks, 1), cache.offset, mlx.DTYPE.BFLOAT16, self.stream);
             try self.model.forward(&logits, toks, mask, &cache);
             try mlx.take(&logits, logits, mlx.int(-1), 1, self.stream);
             try mlx.argmax(&logits, logits, 1, false, self.stream);
@@ -578,11 +467,11 @@ pub const Transformer = struct {
             output_tokens = try self.allocator.realloc(output_tokens, i);
         }
         std.debug.print("\nOutput IDs: {any}\n", .{output_tokens});
-        const prompt_tps = @as(f64, @floatFromInt(initial_tokens.len)) / (prompt_ms / 1000.0);
+        const prompt_tps = @as(f16, @floatFromInt(initial_tokens.len)) / (prompt_ms / 1000.0);
         std.debug.print("\nPrompt:     {d:.2} tokens-per-second ({d} tokens in {d:.2} ms)\n", .{ prompt_tps, initial_tokens.len, prompt_ms });
         if (i > 0) {
-            const gen_ms = @as(f64, @floatFromInt(end_time - start_time));
-            const gen_tps = @as(f64, @floatFromInt(i)) / (gen_ms / 1000.0);
+            const gen_ms = @as(f16, @floatFromInt(end_time - start_time));
+            const gen_tps = @as(f16, @floatFromInt(i)) / (gen_ms / 1000.0);
             std.debug.print("Generation: {d:.2} tokens-per-second ({d} tokens in {d:.2} ms)\n", .{ gen_tps, i, gen_ms });
         }
         return output_tokens;
