@@ -9,7 +9,8 @@ pub fn build(b: *std.Build) !void {
     const install_step = b.step("install-mlx-c", "Install MLX-C if needed");
     const needs_install = !doesFileExist(mlx_c_lib_path);
     if (needs_install) {
-        const clone_cmd = b.addSystemCommand(&[_][]const u8{ "sh", "-c", b.fmt("if [ ! -d {s} ]; then git clone https://github.com/ml-explore/mlx-c.git {s}; fi", .{ mlx_c_path, mlx_c_path }) });
+        // const clone_cmd = b.addSystemCommand(&[_][]const u8{ "sh", "-c", b.fmt("if [ ! -d {s} ]; then git clone https://github.com/ml-explore/mlx-c.git {s}; fi", .{ mlx_c_path, mlx_c_path }) });
+        const clone_cmd = b.addSystemCommand(&[_][]const u8{ "sh", "-c", b.fmt("if [ ! -d {s} ]; then mkdir -p $(dirname {s}) && curl -L https://github.com/ml-explore/mlx-c/archive/refs/tags/v0.1.2.tar.gz | tar xz -C $(dirname {s}) && mv $(dirname {s})/mlx-c-0.1.2 {s}; fi", .{ mlx_c_path, mlx_c_path, mlx_c_path, mlx_c_path, mlx_c_path }) });
         const mkdir_cmd = b.addSystemCommand(&[_][]const u8{ "mkdir", "-p", mlx_c_build_path });
         mkdir_cmd.step.dependOn(&clone_cmd.step);
         const cmake_cmd = b.addSystemCommand(&[_][]const u8{ "cmake", "..", "-DCMAKE_BUILD_TYPE=Release" });
