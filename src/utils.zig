@@ -4,7 +4,7 @@
 
 const std = @import("std");
 
-pub fn download(allocator: std.mem.Allocator, repo_name: []const u8, model_name: []const u8) !void {
+pub fn download(allocator: std.mem.Allocator, repo_name: []const u8, model_name: []const u8, file_names: ?[]const []const u8) !void {
     const mkdir = struct {
         fn mkdir(dir: []const u8) !void {
             std.fs.cwd().makeDir(dir) catch |err| {
@@ -25,11 +25,15 @@ pub fn download(allocator: std.mem.Allocator, repo_name: []const u8, model_name:
         }
     }.fileExists;
     try mkdir(model_name);
-    const filenames = [_][]const u8{
+
+    const default_filenames = [_][]const u8{
         "model.safetensors",
         "config.json",
         "tokenizer.json",
     };
+
+    const filenames = if (file_names) |f| f else &default_filenames;
+
     var args = std.ArrayList([]const u8).init(allocator);
     defer args.deinit();
     try args.append("curl");
@@ -52,7 +56,6 @@ pub fn download(allocator: std.mem.Allocator, repo_name: []const u8, model_name:
             all_exist = false;
             const url_path = try std.fmt.allocPrint(allocator, "https://huggingface.co/{s}/{s}/resolve/main/{s}", .{ repo_name, model_name, filename });
             try paths_to_free.append(url_path);
-
             try args.append(url_path);
             try args.append("-o");
             try args.append(local_path);
@@ -82,10 +85,15 @@ pub fn download(allocator: std.mem.Allocator, repo_name: []const u8, model_name:
 }
 
 pub fn allocJoin(allocator: std.mem.Allocator, parent: []const u8, name: anytype) ![]u8 {
-    const T = @TypeOf(name);
-    const info = @typeInfo(T);
-    const fmt = if (info == .Int or info == .ComptimeInt) ".{d}" else if (T == @TypeOf(null)) "{s}" else ".{s}";
-    return std.fmt.allocPrint(allocator, "{s}" ++ fmt, .{ parent, name });
+    if (@TypeOf(name) == @TypeOf(null) or
+        (@typeInfo(@TypeOf(name)) == .Pointer and name.len == 0))
+    {
+        return allocator.dupe(u8, parent);
+    }
+    if (@typeInfo(@TypeOf(name)) == .Int or @typeInfo(@TypeOf(name)) == .ComptimeInt) {
+        return std.fmt.allocPrint(allocator, "{s}.{d}", .{ parent, name });
+    }
+    return std.fmt.allocPrint(allocator, "{s}.{s}", .{ parent, name });
 }
 
 pub fn loadAudio(alloc: std.mem.Allocator, file_path: []const u8) ![]f32 {
@@ -115,13 +123,13 @@ pub fn loadAudio(alloc: std.mem.Allocator, file_path: []const u8) ![]f32 {
     try process.spawn();
     var float_samples = std.ArrayList(f32).init(alloc);
     defer float_samples.deinit();
-    try float_samples.ensureTotalCapacity(16000 * 10); // Reserve space for ~10s of audio
+    try float_samples.ensureTotalCapacity(16000 * 10);
     const stdout = process.stdout.?.reader();
     var buffer: [buffer_size]u8 = undefined;
     var i16_buffer: [buffer_size / 2]i16 = undefined;
     while (true) {
         const bytes_read = try stdout.read(&buffer);
-        if (bytes_read == 0) break; // EOF
+        if (bytes_read == 0) break;
         const valid_bytes = bytes_read & ~@as(usize, 1);
         const samples = valid_bytes / 2;
         var i: usize = 0;

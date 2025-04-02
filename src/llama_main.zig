@@ -5,7 +5,7 @@
 const std = @import("std");
 const download = @import("utils.zig").download;
 const Tokenizer = @import("tokenizer.zig").Tokenizer;
-const Transformer = @import("transformer.zig").Transformer;
+const Transformer = @import("llama.zig").Transformer;
 
 pub fn main() !void {
     const model_name = "Llama-3.2-1B-Instruct-4bit";
@@ -14,7 +14,7 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
-    try download(allocator, "mlx-community", model_name);
+    try download(allocator, "mlx-community", model_name, null);
     var tokenizer = try Tokenizer.init(allocator, model_name);
     defer tokenizer.deinit();
     var transformer = try Transformer.init(allocator, model_name);
@@ -44,7 +44,7 @@ test "Llama-3.2-1B-Instruct-4bit chat" {
     const sys_prompt = "You are a helpful assistant.";
     const user_input = "Hello world";
     const num_tokens = 10;
-    try download(allocator, "mlx-community", model_name);
+    try download(allocator, "mlx-community", model_name, null);
     var tokenizer = try Tokenizer.init(allocator, model_name);
     defer tokenizer.deinit();
     var transformer = try Transformer.init(allocator, model_name);

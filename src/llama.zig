@@ -1,4 +1,4 @@
-//! transformer.zig - Llama-3.2-Instruct
+//! llama.zig - Llama-3.2-Instruct
 //!
 //! Copyright 2025 Joe
 
@@ -73,7 +73,7 @@ pub const Attention = struct {
     n_kv_heads: c_int,
     head_dim: c_int,
     n_repeat: c_int,
-    scale: f32,
+    scale: mlx.Array,
     q_weight: mlx.Weight,
     k_weight: mlx.Weight,
     v_weight: mlx.Weight,
@@ -85,10 +85,9 @@ pub const Attention = struct {
     pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, n_heads: c_int, n_kv_heads: c_int, head_dim: c_int, rope_theta: f32, rope_scaling_config: LlamaConfig.RopeScalingConfig, quant_config: ?mlx.QuantConfig, stream: mlx.Stream) !Self {
         const key = try allocJoin(allocator, parent, name);
         errdefer allocator.free(key);
-        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
+        const scale = mlx.arrayNewFloat(1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))));
         const n_repeat = @divExact(n_heads, n_kv_heads);
         const rope = try Llama3RoPE.init(head_dim, rope_theta, rope_scaling_config, stream);
-
         return Self{
             .q_weight = try mlx.Weight.init(quant_config, stream),
             .k_weight = try mlx.Weight.init(quant_config, stream),
@@ -140,13 +139,13 @@ pub const Attention = struct {
         try mlx.rEshap(&v, v, "b l (h d) -> b h l d", .{ .h = self.n_kv_heads, .d = self.head_dim }, self.stream);
         try self.rope.forward(&q, q, offset);
         try self.rope.forward(&k, k, offset);
-        try mlx.multiply(&q, q, mlx.float(self.scale), self.stream);
+        try mlx.multiply(&q, q, self.scale, self.stream);
         if (cache) |c| try c.update(&k, &v, offset, self.stream);
         try mlx.rEpeat(&k, k, "b h l d -> b (repeat h) l d", .{ .repeat = self.n_repeat }, self.stream);
         try mlx.rEpeat(&v, v, "b h l d -> b (repeat h) l d", .{ .repeat = self.n_repeat }, self.stream);
         try mlx.einsum(&w, .{ q, k }, "b h l d, b h k d -> b h l k", self.stream);
         if (mask) |m| try mlx.add(&w, w, m, self.stream);
-        try mlx.softmax(&w, w, &[_]c_int{3}, true, self.stream);
+        try mlx.softmax(&w, w, &.{3}, true, self.stream);
         try mlx.einsum(&w, .{ w, v }, "b h l k, b h k d -> b h l d", self.stream);
         try mlx.rEshap(&w, w, "b h l d -> b l (h d)", .{}, self.stream);
         try self.o_weight.forward(result, w);
@@ -159,6 +158,7 @@ pub const Attention = struct {
         self.o_weight.deinit();
         self.rope.deinit();
         self.allocator.free(self.key);
+        mlx.arrayFree(self.scale);
     }
 };
 
@@ -432,14 +432,6 @@ pub const Transformer = struct {
             mlx.arrayFree(logits);
             mlx.arrayFree(mask);
         }
-        const isEosToken = struct {
-            fn check(token: u32, eos_tokens: []const u32) bool {
-                for (eos_tokens) |eos| {
-                    if (token == eos) return true;
-                }
-                return false;
-            }
-        }.check;
         var start_time = std.time.milliTimestamp();
         var prompt_ms: f16 = undefined;
         var i: usize = 0;
@@ -451,8 +443,7 @@ pub const Transformer = struct {
             try mlx.item(&output_tokens[i], logits);
             try mlx.arraySetData(&toks, &output_tokens[i], .{ 1, 1 }, mlx.DTYPE.UINT32);
             std.debug.print("Generated token {d}/{d}: {d}\n", .{ i + 1, num_tokens, output_tokens[i] });
-            if (isEosToken(output_tokens[i], self.eos_token_id)) {
-                std.debug.print("EOS token reached after {d} tokens\n", .{i + 1});
+            if (std.mem.indexOfScalar(u32, self.eos_token_id, output_tokens[i]) != null) {
                 i += 1;
                 break;
             }

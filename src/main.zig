@@ -3,19 +3,26 @@
 //! Copyright 2025 Joe
 
 const std = @import("std");
-
 pub fn main() !void {
     std.debug.print(
         \\
         \\MLX Zig ML Models
         \\================
         \\
-        \\This project contains multiple ML model interfaces:
+        \\Zig Build System Usage:
         \\
-        \\- For Whisper transcription: zig build run-whisper
-        \\- For Llama 3.2 chat: zig build run-llama
+        \\  zig build                           - Builds all executables and installs to zig-out/bin
+        \\  zig build run-whisper -- [file]     - Builds and runs whisper with optional audio file
+        \\  zig build run-phi                   - Builds and runs phi demo
+        \\  zig build run-llama                 - Builds and runs llama chat
+        \\  zig build run                       - Builds and runs main.zig (for development/testing)
         \\
-        \\Please use the specific build command for your desired model.
+        \\Direct executable usage:
+        \\
+        \\  zig-out/bin/whisper [audio_file]    - Run whisper with optional audio file
+        \\  zig-out/bin/phi [prompt]            - Run phi with optional user prompt
+        \\  zig-out/bin/llama                   - Run llama chat
+        \\  zig-out/bin/main                    - Run main app with build instructions
         \\
         \\
     , .{});
@@ -23,6 +30,7 @@ pub fn main() !void {
 
 test "Redirects" {
     std.debug.print("\n=== MAIN.ZIG ===\n\n", .{});
+    _ = @import("phi_main.zig");
     _ = @import("whisper_main.zig");
     _ = @import("llama_main.zig");
 }

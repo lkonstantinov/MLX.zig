@@ -16,6 +16,8 @@ pub const MultiHeadAttention = struct {
     key: []const u8,
     n_heads: c_int,
     d_model: c_int,
+    head_dim: c_int,
+    scale: mlx.Array,
     q_proj: mlx.Linear,
     k_proj: mlx.Linear,
     v_proj: mlx.Linear,
@@ -30,6 +32,8 @@ pub const MultiHeadAttention = struct {
         const k_proj = try mlx.Linear.init(allocator, key, "k_proj", bias_k, null, stream);
         const v_proj = try mlx.Linear.init(allocator, key, "v_proj", true, null, stream);
         const out_proj = try mlx.Linear.init(allocator, key, "out_proj", true, null, stream);
+        const head_dim = @divExact(d_model, n_heads);
+        const scale = mlx.arrayNewFloat(1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))));
         return Self{
             .key = key,
             .n_heads = n_heads,
@@ -40,6 +44,8 @@ pub const MultiHeadAttention = struct {
             .out_proj = out_proj,
             .stream = stream,
             .allocator = allocator,
+            .head_dim = head_dim,
+            .scale = scale,
         };
     }
 
@@ -54,16 +60,12 @@ pub const MultiHeadAttention = struct {
         var q = mlx.arrayNew();
         var k = mlx.arrayNew();
         var v = mlx.arrayNew();
-        var qk = mlx.arrayNew();
-        var attn = mlx.arrayNew();
-        var wv = mlx.arrayNew();
+        var w = mlx.arrayNew();
         defer {
             mlx.arrayFree(q);
             mlx.arrayFree(k);
             mlx.arrayFree(v);
-            mlx.arrayFree(qk);
-            mlx.arrayFree(attn);
-            mlx.arrayFree(wv);
+            mlx.arrayFree(w);
         }
         try self.q_proj.forward(&q, x);
         if (xa) |cross_input| {
@@ -79,25 +81,20 @@ pub const MultiHeadAttention = struct {
         } else {
             try self.k_proj.forward(&k, x);
             try self.v_proj.forward(&v, x);
-
             if (kv_cache) |cache| {
                 try cache.update(&k, &v, null, self.stream);
             }
         }
-        const head_dim = @divExact(self.d_model, self.n_heads);
-        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
-        try mlx.rEshap(&q, q, "b l (h d) -> b h l d", .{ .h = self.n_heads, .d = head_dim }, self.stream);
-        try mlx.rEshap(&k, k, "b l (h d) -> b h l d", .{ .h = self.n_heads, .d = head_dim }, self.stream);
-        try mlx.rEshap(&v, v, "b l (h d) -> b h l d", .{ .h = self.n_heads, .d = head_dim }, self.stream);
-        try mlx.multiply(&q, q, mlx.float(scale), self.stream);
-        try mlx.einsum(&qk, .{ q, k }, "b h l d, b h k d -> b h l k", self.stream);
-        if (mask) |attention_mask| {
-            try mlx.add(&qk, qk, attention_mask, self.stream);
-        }
-        try mlx.softmax(&attn, qk, &[_]c_int{3}, true, self.stream);
-        try mlx.einsum(&wv, .{ attn, v }, "b h l k, b h k d -> b h l d", self.stream);
-        try mlx.rEshap(&wv, wv, "b h l d -> b l (h d)", .{}, self.stream);
-        try self.out_proj.forward(result, wv);
+        try mlx.rEshap(&q, q, "b l (h d) -> b h l d", .{ .h = self.n_heads, .d = self.head_dim }, self.stream);
+        try mlx.rEshap(&k, k, "b l (h d) -> b h l d", .{ .h = self.n_heads, .d = self.head_dim }, self.stream);
+        try mlx.rEshap(&v, v, "b l (h d) -> b h l d", .{ .h = self.n_heads, .d = self.head_dim }, self.stream);
+        try mlx.multiply(&q, q, self.scale, self.stream);
+        try mlx.einsum(&w, .{ q, k }, "b h l d, b h k d -> b h l k", self.stream);
+        if (mask) |attention_mask| try mlx.add(&w, w, attention_mask, self.stream);
+        try mlx.softmax(&w, w, &.{3}, true, self.stream);
+        try mlx.einsum(&w, .{ w, v }, "b h l k, b h k d -> b h l d", self.stream);
+        try mlx.rEshap(&w, w, "b h l d -> b l (h d)", .{}, self.stream);
+        try self.out_proj.forward(result, w);
     }
 
     pub fn deinit(self: *Self) void {
@@ -106,6 +103,7 @@ pub const MultiHeadAttention = struct {
         self.k_proj.deinit();
         self.v_proj.deinit();
         self.out_proj.deinit();
+        mlx.arrayFree(self.scale);
     }
 };
 
@@ -161,39 +159,27 @@ pub const ResidualAttentionBlock = struct {
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array, xa: ?mlx.Array, mask: ?mlx.Array, kv_cache: ?*mlx.KVCache, cross_kv_cache: ?*mlx.KVCache) !void {
-        var attn_norm = mlx.arrayNew();
         var attn = mlx.arrayNew();
-        var cross_attn_norm = mlx.arrayNew();
-        var cross_out = mlx.arrayNew();
-        var ff_norm = mlx.arrayNew();
-        var fc1_out = mlx.arrayNew();
-        var gelu_out = mlx.arrayNew();
-        var fc2_out = mlx.arrayNew();
+        var xatn = mlx.arrayNew();
         defer {
-            mlx.arrayFree(attn_norm);
             mlx.arrayFree(attn);
-            mlx.arrayFree(cross_attn_norm);
-            mlx.arrayFree(cross_out);
-            mlx.arrayFree(ff_norm);
-            mlx.arrayFree(fc1_out);
-            mlx.arrayFree(gelu_out);
-            mlx.arrayFree(fc2_out);
+            mlx.arrayFree(xatn);
         }
-        try self.self_attn_layer_norm.forward(&attn_norm, x);
-        try self.self_attn.forward(&attn, attn_norm, null, mask, kv_cache);
+        try self.self_attn_layer_norm.forward(&attn, x);
+        try self.self_attn.forward(&attn, attn, null, mask, kv_cache);
         try mlx.add(&attn, x, attn, self.stream);
         if (self.cross_attn != null and self.cross_attn_layer_norm != null) {
             if (xa) |encoder_out| {
-                try self.cross_attn_layer_norm.?.forward(&cross_attn_norm, attn);
-                try self.cross_attn.?.forward(&cross_out, cross_attn_norm, encoder_out, null, cross_kv_cache);
-                try mlx.add(&attn, attn, cross_out, self.stream);
+                try self.cross_attn_layer_norm.?.forward(&xatn, attn);
+                try self.cross_attn.?.forward(&xatn, xatn, encoder_out, null, cross_kv_cache);
+                try mlx.add(&attn, xatn, attn, self.stream);
             }
         }
-        try self.final_layer_norm.forward(&ff_norm, attn);
-        try self.fc1.forward(&fc1_out, ff_norm);
-        try mlx.gelu(&gelu_out, fc1_out, self.stream);
-        try self.fc2.forward(&fc2_out, gelu_out);
-        try mlx.add(result, attn, fc2_out, self.stream);
+        try self.final_layer_norm.forward(&xatn, attn);
+        try self.fc1.forward(&xatn, xatn);
+        try mlx.gelu(&xatn, xatn, self.stream);
+        try self.fc2.forward(&xatn, xatn);
+        try mlx.add(result, xatn, attn, self.stream);
     }
 
     pub fn deinit(self: *Self) void {
@@ -261,23 +247,15 @@ pub const AudioEncoder = struct {
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array) !void {
-        var conv1_out = mlx.arrayNew();
-        var conv2_out = mlx.arrayNew();
-        var hidden = mlx.arrayNew();
-        defer {
-            mlx.arrayFree(conv1_out);
-            mlx.arrayFree(conv2_out);
-            mlx.arrayFree(hidden);
-        }
-        try self.conv1.forward(&conv1_out, x);
-        try mlx.gelu(&hidden, conv1_out, self.stream);
-        try self.conv2.forward(&conv2_out, hidden);
-        try mlx.gelu(&hidden, conv2_out, self.stream);
-        try mlx.add(&hidden, hidden, self.positional_embedding, self.stream);
+        try self.conv1.forward(result, x);
+        try mlx.gelu(result, result.*, self.stream);
+        try self.conv2.forward(result, result.*);
+        try mlx.gelu(result, result.*, self.stream);
+        try mlx.add(result, result.*, self.positional_embedding, self.stream);
         for (self.layers) |*layer| {
-            try layer.forward(&hidden, hidden, null, null, null, null);
+            try layer.forward(result, result.*, null, null, null, null);
         }
-        try self.layer_norm.forward(result, hidden);
+        try self.layer_norm.forward(result, result.*);
     }
 
     pub fn deinit(self: *Self) void {
@@ -321,7 +299,6 @@ pub const TextDecoder = struct {
             .positional_embedding = positional_embedding,
             .layers = layers,
             .layer_norm = layer_norm,
-            // .mask = mask,
             .stream = stream,
             .allocator = allocator,
             .key = key,
@@ -338,23 +315,17 @@ pub const TextDecoder = struct {
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array, xa: mlx.Array, mask: mlx.Array, kv_cache: *mlx.Cache, cross_kv_cache: *mlx.Cache) !void {
-        var embedded = mlx.arrayNew();
-        var hidden = mlx.arrayNew();
-        defer {
-            mlx.arrayFree(embedded);
-            mlx.arrayFree(hidden);
-        }
         const offset = kv_cache.offset;
-        try self.embed_tokens.forward(&embedded, x);
+        try self.embed_tokens.forward(result, x);
         var pos_embed_slice = mlx.arrayNew();
         defer mlx.arrayFree(pos_embed_slice);
         try mlx.slice(&pos_embed_slice, self.positional_embedding, &[_]c_int{ offset, 0 }, &[_]c_int{ offset + mlx.arrayDim(x, 1), mlx.arrayDim(self.positional_embedding, 1) }, &[_]c_int{ 1, 1 }, self.stream);
-        try mlx.add(&hidden, embedded, pos_embed_slice, self.stream);
+        try mlx.add(result, result.*, pos_embed_slice, self.stream);
         for (self.layers, 0..) |*layer, i| {
-            _ = try layer.forward(&hidden, hidden, xa, mask, &kv_cache.layers[i], &cross_kv_cache.layers[i]);
+            _ = try layer.forward(result, result.*, xa, mask, &kv_cache.layers[i], &cross_kv_cache.layers[i]);
         }
-        try self.layer_norm.forward(&hidden, hidden);
-        try self.embed_tokens.asLinear(result, hidden);
+        try self.layer_norm.forward(result, result.*);
+        try self.embed_tokens.asLinear(result, result.*);
     }
 
     pub fn deinit(self: *Self) void {
@@ -491,7 +462,7 @@ pub const Transcriber = struct {
         defer kv_cache.deinit();
         var cross_kv_cache = try mlx.Cache.init(self.allocator, self.model.decoder.layers.len, 1);
         defer cross_kv_cache.deinit();
-        var output_tokens = try self.allocator.alloc(u32, 500);
+        var output_tokens = try self.allocator.alloc(u32, 446);
         errdefer self.allocator.free(output_tokens);
         var toks = try mlx.arrayNewData(&[_]u32{ 50258, 50360, 50365 }, .{ 1, 3 }, mlx.DTYPE.UINT32);
         defer mlx.arrayFree(toks);
@@ -512,9 +483,9 @@ pub const Transcriber = struct {
                 i += 1;
                 break;
             }
-            std.debug.print("\nGenerated at {d}: {d}\n", .{ i, output_tokens[i] });
+            std.debug.print("Generated at {d}: {d}\n", .{ i, output_tokens[i] });
         }
-        if (i < 500) {
+        if (i < 446) {
             output_tokens = try self.allocator.realloc(output_tokens, i);
         }
         return output_tokens;
@@ -584,6 +555,7 @@ fn createSinusoids(result: *mlx.Array, length: c_int, channels: c_int, stream: m
     try mlx.sin(&sin_val, scaled_time, stream);
     try mlx.cos(&cos_val, scaled_time, stream);
     try mlx.concatenate(result, .{ sin_val, cos_val }, 1, stream);
+    try mlx.astype(result, result.*, mlx.DTYPE.FLOAT16, stream);
 }
 
 const WhisperConfig = struct {

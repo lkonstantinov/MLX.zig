@@ -11,8 +11,13 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
     const model_name = "whisper-large-v3-turbo";
-    const audio_file = "alive.mp3";
-    try download(allocator, "openai", model_name);
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+    var audio_file: []const u8 = "alive.mp3";
+    if (args.len > 1) {
+        audio_file = args[1];
+    }
+    try download(allocator, "openai", model_name, null);
     var transcriber = try Transcriber.init(allocator, model_name);
     defer transcriber.deinit();
     const transcription = try transcriber.transcribe(audio_file);
@@ -27,7 +32,7 @@ test "Whisper transcription" {
     defer _ = gpa.deinit();
     const model_name = "whisper-large-v3-turbo";
     const audio_file = "alive.mp3";
-    try download(allocator, "openai", model_name);
+    try download(allocator, "openai", model_name, null);
     var transcriber = try Transcriber.init(allocator, model_name);
     defer transcriber.deinit();
     const transcription = try transcriber.transcribe(audio_file);

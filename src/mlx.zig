@@ -464,6 +464,15 @@ pub fn ones(result: *C.mlx_array, shape: []const c_int, dtype: C.mlx_dtype, stre
     try mlxOp(C.mlx_ones(result, shape.ptr, shape.len, dtype, stream));
 }
 
+pub fn split(outputs: anytype, a: C.mlx_array, indices: []const c_int, axis: c_int, stream: C.mlx_stream) !void {
+    var results = C.mlx_vector_array_new();
+    defer _ = C.mlx_vector_array_free(results);
+    try mlxOp(C.mlx_split(&results, a, indices.ptr, indices.len, axis, stream));
+    inline for (std.meta.fields(@TypeOf(outputs)), 0..) |field, i| {
+        try mlxOp(C.mlx_vector_array_get(@field(outputs, field.name), results, i));
+    }
+}
+
 pub fn arrayFree(arr: C.mlx_array) void {
     _ = C.mlx_array_free(arr);
 }
@@ -475,6 +484,7 @@ pub fn streamFree(stream: C.mlx_stream) void {
 pub const defaultCpuStreamNew = C.mlx_default_cpu_stream_new;
 pub const defaultGpuStreamNew = C.mlx_default_gpu_stream_new;
 pub const arrayNew = C.mlx_array_new;
+pub const arrayNewFloat = C.mlx_array_new_float;
 pub const arrayDim = C.mlx_array_dim;
 pub const arrayShape = C.mlx_array_shape;
 
@@ -505,6 +515,12 @@ pub fn fastLayerNorm(result: *C.mlx_array, x: anytype, weight: anytype, bias: an
         if (bias_conv.temp) _ = C.mlx_array_free(bias_conv.arr);
     }
     try mlxOp(C.mlx_fast_layer_norm(result, x_conv.arr, weight_conv.arr, bias_conv.arr, eps, stream));
+}
+
+pub fn fastScaledDotProductAttention(result: *C.mlx_array, queries: C.mlx_array, keys: C.mlx_array, values: C.mlx_array, scale: f32, mask: ?C.mlx_array, stream: C.mlx_stream) !void {
+    const memory_threshold = C.mlx_optional_int{ .has_value = false, .value = 0 };
+    const mask_ptr = if (mask) |m| m else C.mlx_array_empty;
+    try mlxOp(C.mlx_fast_scaled_dot_product_attention(result, queries, keys, values, scale, mask_ptr, memory_threshold, stream));
 }
 
 /// ============================================================================
@@ -1007,7 +1023,7 @@ pub const Safetensors = struct {
 pub fn loadArray(weight: *C.mlx_array, name: []const u8, ext: ?[]const u8, weights_map: *const C.mlx_map_string_to_array) !void {
     var buf: [1024]u8 = undefined;
     const key = if (ext) |e| try std.fmt.bufPrintZ(&buf, "{s}.{s}", .{ name, e }) else name;
-    // std.debug.print("\nLoading {s}\n", .{key});
+    // std.debug.print("Loading {s}\n", .{key});
     try mlxOp(C.mlx_map_string_to_array_get(weight, weights_map.*, key.ptr));
     try mlxOp(C.mlx_array_eval(weight.*));
 }
