@@ -27,6 +27,7 @@ This creates the following executables in `zig-out/bin/`:
 - `whisper` - Whisper speech-to-text
 - `phi` - Phi-4 text generation
 - `llama` - Llama-3.2 chat
+- `llm` - Unified interface for multiple LLM models
 - `main` - Basic info
 
 ## Speech-to-Text with Whisper-Turbo-Large
@@ -62,6 +63,45 @@ defer transcriber.deinit();
 // Transcribe audio file
 const transcription = try transcriber.transcribe("test.mp3");
 defer allocator.free(transcription);
+```
+
+## Large Language Models - Qwen-2.5, Olympic-Coder, Phi-4, Llama-3.2, ...
+
+The `llm` executable provides a unified interface to easily switch between different LLM models via a consistent command-line interface.
+
+Run using the build system:
+```fish
+zig build run-llm
+```
+
+Or run the executable directly with various options:
+```fish
+zig-out/bin/llm [options] [input]
+```
+
+### Options:
+```
+--model-type=TYPE       Model type: llama, phi, qwen, olympic (default: llama)
+--model-name=NAME       Model name to download/use
+--system-prompt=PROMPT  System prompt for the model
+--num-tokens=N          Number of tokens to generate
+--help                  Show this help
+```
+
+### Examples:
+
+```fish
+# Use Llama (default)
+zig-out/bin/llm "Hi mom!"
+
+# Use Phi model with custom prompt
+zig-out/bin/llm --model-type=phi "How should I explain the Internet?"
+
+# Use Olympic Coder model for programming tasks
+zig-out/bin/llm --model-type=olympic "Write a python program to calculate the 10th Fibonacci number"
+
+# Use Qwen Coder for code completion
+zig-out/bin/llm --model-type=qwen "#write a quick sort algorithm"
 ```
 
 ## Phi-4 Text Generation

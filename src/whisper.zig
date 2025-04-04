@@ -4,12 +4,12 @@
 
 const std = @import("std");
 const mlx = @import("mlx.zig");
+const Tokenizer = @import("tokenizer.zig").Tokenizer;
 const loadJson = @import("utils.zig").loadJson;
 const loadAudio = @import("utils.zig").loadAudio;
 const allocJoin = @import("utils.zig").allocJoin;
-const Tokenizer = @import("tokenizer.zig").Tokenizer;
-const formatRange = @import("tokenizer.zig").formatRange;
-const formatRangeFloat = @import("tokenizer.zig").formatRangeFloat;
+const formatRange = @import("utils.zig").formatRange;
+const formatRangeFloat = @import("utils.zig").formatRangeFloat;
 
 pub const MultiHeadAttention = struct {
     const Self = @This();
@@ -18,6 +18,7 @@ pub const MultiHeadAttention = struct {
     d_model: c_int,
     head_dim: c_int,
     scale: mlx.Array,
+    // scale: f32,
     q_proj: mlx.Linear,
     k_proj: mlx.Linear,
     v_proj: mlx.Linear,
@@ -34,6 +35,7 @@ pub const MultiHeadAttention = struct {
         const out_proj = try mlx.Linear.init(allocator, key, "out_proj", true, null, stream);
         const head_dim = @divExact(d_model, n_heads);
         const scale = mlx.arrayNewFloat(1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))));
+        // const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
         return Self{
             .key = key,
             .n_heads = n_heads,
@@ -88,13 +90,14 @@ pub const MultiHeadAttention = struct {
         try mlx.rEshap(&q, q, "b l (h d) -> b h l d", .{ .h = self.n_heads, .d = self.head_dim }, self.stream);
         try mlx.rEshap(&k, k, "b l (h d) -> b h l d", .{ .h = self.n_heads, .d = self.head_dim }, self.stream);
         try mlx.rEshap(&v, v, "b l (h d) -> b h l d", .{ .h = self.n_heads, .d = self.head_dim }, self.stream);
+        // try mlx.fastScaledDotProductAttention(result, q, k, v, self.scale, mask, self.stream); // : is slower than naive SDPA impl.. weird.
         try mlx.multiply(&q, q, self.scale, self.stream);
         try mlx.einsum(&w, .{ q, k }, "b h l d, b h k d -> b h l k", self.stream);
         if (mask) |attention_mask| try mlx.add(&w, w, attention_mask, self.stream);
         try mlx.softmax(&w, w, &.{3}, true, self.stream);
-        try mlx.einsum(&w, .{ w, v }, "b h l k, b h k d -> b h l d", self.stream);
-        try mlx.rEshap(&w, w, "b h l d -> b l (h d)", .{}, self.stream);
-        try self.out_proj.forward(result, w);
+        try mlx.einsum(result, .{ w, v }, "b h l k, b h k d -> b h l d", self.stream);
+        try mlx.rEshap(result, result.*, "b h l d -> b l (h d)", .{}, self.stream);
+        try self.out_proj.forward(result, result.*);
     }
 
     pub fn deinit(self: *Self) void {
@@ -103,7 +106,7 @@ pub const MultiHeadAttention = struct {
         self.k_proj.deinit();
         self.v_proj.deinit();
         self.out_proj.deinit();
-        mlx.arrayFree(self.scale);
+        // mlx.arrayFree(self.scale);
     }
 };
 

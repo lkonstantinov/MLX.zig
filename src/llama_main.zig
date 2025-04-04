@@ -9,6 +9,18 @@ const Transformer = @import("llama.zig").Transformer;
 
 pub fn main() !void {
     const model_name = "Llama-3.2-1B-Instruct-4bit";
+    const chat_format =
+        \\<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+        \\
+        \\Cutting Knowledge Date: December 2023
+        \\Today Date: 26 Jul 2024
+        \\
+        \\{s}<|eot_id|><|start_header_id|>user<|end_header_id|>
+        \\
+        \\{s}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+        \\
+        \\
+    ;
     const sys_prompt = "You are a helpful assistant.";
     const num_tokens = 100;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -25,7 +37,7 @@ pub fn main() !void {
     const input_slice = try stdin.readUntilDelimiterOrEof(&input_buffer, '\n') orelse "";
     const user_input = try allocator.dupe(u8, input_slice);
     defer allocator.free(user_input);
-    const input_ids = try tokenizer.encodeChat(null, sys_prompt, user_input);
+    const input_ids = try tokenizer.encodeChat(chat_format, &.{ sys_prompt, user_input });
     defer allocator.free(input_ids);
     const output_ids = try transformer.generate(input_ids, num_tokens);
     defer allocator.free(output_ids);
@@ -41,6 +53,19 @@ test "Llama-3.2-1B-Instruct-4bit chat" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     const model_name = "Llama-3.2-1B-Instruct-4bit";
+
+    const chat_format =
+        \\<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+        \\
+        \\Cutting Knowledge Date: December 2023
+        \\Today Date: 26 Jul 2024
+        \\
+        \\{s}<|eot_id|><|start_header_id|>user<|end_header_id|>
+        \\
+        \\{s}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+        \\
+        \\
+    ;
     const sys_prompt = "You are a helpful assistant.";
     const user_input = "Hello world";
     const num_tokens = 10;
@@ -49,7 +74,7 @@ test "Llama-3.2-1B-Instruct-4bit chat" {
     defer tokenizer.deinit();
     var transformer = try Transformer.init(allocator, model_name);
     defer transformer.deinit();
-    const input_ids = try tokenizer.encodeChat(null, sys_prompt, user_input);
+    const input_ids = try tokenizer.encodeChat(chat_format, &.{ sys_prompt, user_input });
     defer allocator.free(input_ids);
     const output_ids = try transformer.generate(input_ids, num_tokens);
     defer allocator.free(output_ids);

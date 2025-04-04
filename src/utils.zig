@@ -96,6 +96,68 @@ pub fn allocJoin(allocator: std.mem.Allocator, parent: []const u8, name: anytype
     return std.fmt.allocPrint(allocator, "{s}.{s}", .{ parent, name });
 }
 
+pub fn comptimeJoin(comptime parent: []const u8, comptime name: anytype) *const [:0]u8 {
+    comptime {
+        if (@TypeOf(name) == @TypeOf(null) or
+            (@typeInfo(@TypeOf(name)) == .Pointer and name.len == 0))
+        {
+            return parent ++ "\x00";
+        }
+        if (@typeInfo(@TypeOf(name)) == .Int or @typeInfo(@TypeOf(name)) == .ComptimeInt) {
+            return std.fmt.comptimePrint("{s}.{d}", .{ parent, name });
+        }
+        return std.fmt.comptimePrint("{s}.{s}", .{ parent, name });
+    }
+}
+
+pub fn formatDynamic(
+    allocator: std.mem.Allocator,
+    chat_fmt: []const u8,
+    replacements: []const []const u8,
+) ![]const u8 {
+    var segments = std.ArrayList([]const u8).init(allocator);
+    defer segments.deinit();
+    var splitter = std.mem.splitSequence(u8, chat_fmt, "{s}");
+    while (splitter.next()) |segment| {
+        try segments.append(segment);
+    }
+    const expected_replacements = segments.items.len - 1;
+    if (replacements.len != expected_replacements) {
+        return error.ReplacementCountMismatch;
+    }
+    var result = std.ArrayList(u8).init(allocator);
+    errdefer result.deinit();
+    for (segments.items[0 .. segments.items.len - 1], replacements) |segment, replacement| {
+        try result.appendSlice(segment);
+        try result.appendSlice(replacement);
+    }
+    try result.appendSlice(segments.items[segments.items.len - 1]);
+    return try result.toOwnedSlice();
+}
+
+pub fn formatRange(comptime format: []const u8, comptime start: usize, comptime end: usize) [end - start][]const u8 {
+    var result: [end - start][]const u8 = undefined;
+    inline for (&result, 0..) |*ptr, i| {
+        ptr.* = std.fmt.comptimePrint(format, .{start + i});
+    }
+    return result;
+}
+
+pub fn formatRangeFloat(comptime count: usize) [count][]const u8 {
+    var result: [count][]const u8 = undefined;
+    inline for (&result, 0..) |*ptr, i| {
+        const seconds = @as(f32, @floatFromInt(i)) * 0.02;
+        const whole = @as(u32, @intFromFloat(seconds));
+        const frac = @as(u32, @intFromFloat((seconds - @as(f32, @floatFromInt(whole))) * 100.0 + 0.5)); // +0.5 for rounding
+        if (frac < 10) {
+            ptr.* = std.fmt.comptimePrint("<|{d}.0{d}|>", .{ whole, frac });
+        } else {
+            ptr.* = std.fmt.comptimePrint("<|{d}.{d}|>", .{ whole, frac });
+        }
+    }
+    return result;
+}
+
 pub fn loadAudio(alloc: std.mem.Allocator, file_path: []const u8) ![]f32 {
     const buffer_size = 16384;
     const args = [_][]const u8{

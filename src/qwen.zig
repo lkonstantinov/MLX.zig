@@ -1,4 +1,4 @@
-//! phi.zig - Phi-4
+//! qwen.zig - Qwen 2.5 (Coder, Olympic)
 //!
 //! Copyright 2025
 
@@ -13,15 +13,21 @@ pub const RoPE = struct {
     base: mlx.OptionalFloat,
     freqs: mlx.Array,
     stream: mlx.Stream,
+    rope_scaling: ?QwenConfig.RopeScalingConfig,
 
-    pub fn init(dims: c_int, base_: f32, stream: mlx.Stream) !Self {
-        const freqs = mlx.C.mlx_array_empty;
-        const base = mlx.OptionalFloat{ .has_value = true, .value = base_ };
+    pub fn init(dims: c_int, base_: f32, scaling_config: ?QwenConfig.RopeScalingConfig, max_position_embeddings: c_int, stream: mlx.Stream) !Self {
+        _ = max_position_embeddings;
+        var freqs = mlx.arrayNew();
+        try mlx.arange(&freqs, 0, @floatFromInt(dims), 2, mlx.DTYPE.FLOAT32, stream);
+        try mlx.divide(&freqs, freqs, mlx.float(@floatFromInt(dims)), stream);
+        try mlx.power(&freqs, mlx.float(base_), freqs, stream);
+        const base = mlx.OptionalFloat{ .has_value = false, .value = 0.0 };
         return Self{
             .dims = dims,
             .base = base,
             .freqs = freqs,
             .stream = stream,
+            .rope_scaling = scaling_config,
         };
     }
 
@@ -30,7 +36,7 @@ pub const RoPE = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        _ = self;
+        mlx.arrayFree(self.freqs);
     }
 };
 
@@ -41,35 +47,38 @@ pub const Attention = struct {
     n_kv_heads: c_int,
     head_dim: c_int,
     scale: f32,
-    q_pos: c_int,
-    k_pos: c_int,
-    qkv_proj: mlx.Linear,
+    q_proj: mlx.Linear,
+    k_proj: mlx.Linear,
+    v_proj: mlx.Linear,
     o_proj: mlx.Linear,
     rope: RoPE,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, config: *const PhiConfig, stream: mlx.Stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, config: *const QwenConfig, stream: mlx.Stream) !Self {
         const key = try allocJoin(allocator, parent, name);
         errdefer allocator.free(key);
         const n_heads = config.num_attention_heads;
-        const n_kv_heads = config.num_key_value_heads orelse config.num_attention_heads;
+        const n_kv_heads = config.num_key_value_heads;
         const head_dim = @divExact(config.hidden_size, n_heads);
         const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
-        const qkv_proj = try mlx.Linear.init(allocator, key, "qkv_proj", false, config.quantization, stream);
+
+        const q_proj = try mlx.Linear.init(allocator, key, "q_proj", true, config.quantization, stream);
+        const k_proj = try mlx.Linear.init(allocator, key, "k_proj", true, config.quantization, stream);
+        const v_proj = try mlx.Linear.init(allocator, key, "v_proj", true, config.quantization, stream);
         const o_proj = try mlx.Linear.init(allocator, key, "o_proj", false, config.quantization, stream);
-        const rope = try RoPE.init(head_dim, config.rope_theta, stream);
-        const q_pos = n_heads * head_dim;
-        const k_pos = q_pos + n_kv_heads * head_dim;
+
+        const rope = try RoPE.init(head_dim, config.rope_theta, config.rope_scaling, config.max_position_embeddings, stream);
+
         return Self{
             .key = key,
             .n_heads = n_heads,
             .n_kv_heads = n_kv_heads,
             .head_dim = head_dim,
             .scale = scale,
-            .q_pos = q_pos,
-            .k_pos = k_pos,
-            .qkv_proj = qkv_proj,
+            .q_proj = q_proj,
+            .k_proj = k_proj,
+            .v_proj = v_proj,
             .o_proj = o_proj,
             .rope = rope,
             .stream = stream,
@@ -78,23 +87,24 @@ pub const Attention = struct {
     }
 
     pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.qkv_proj.load(weights_map);
+        try self.q_proj.load(weights_map);
+        try self.k_proj.load(weights_map);
+        try self.v_proj.load(weights_map);
         try self.o_proj.load(weights_map);
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array, mask: ?mlx.Array, cache: ?*mlx.KVCache, offset: c_int) !void {
-        var qkv = mlx.arrayNew();
         var q = mlx.arrayNew();
         var k = mlx.arrayNew();
         var v = mlx.arrayNew();
         defer {
-            mlx.arrayFree(qkv);
             mlx.arrayFree(q);
             mlx.arrayFree(k);
             mlx.arrayFree(v);
         }
-        try self.qkv_proj.forward(&qkv, x);
-        try mlx.split(&.{ &q, &k, &v }, qkv, &[_]c_int{ self.q_pos, self.k_pos }, 2, self.stream);
+        try self.q_proj.forward(&q, x);
+        try self.k_proj.forward(&k, x);
+        try self.v_proj.forward(&v, x);
         try mlx.rEshap(&q, q, "b l (h d) -> b h l d", .{ .h = self.n_heads, .d = self.head_dim }, self.stream);
         try mlx.rEshap(&k, k, "b l (h d) -> b h l d", .{ .h = self.n_kv_heads, .d = self.head_dim }, self.stream);
         try mlx.rEshap(&v, v, "b l (h d) -> b h l d", .{ .h = self.n_kv_heads, .d = self.head_dim }, self.stream);
@@ -107,7 +117,9 @@ pub const Attention = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.qkv_proj.deinit();
+        self.q_proj.deinit();
+        self.k_proj.deinit();
+        self.v_proj.deinit();
         self.o_proj.deinit();
         self.rope.deinit();
         self.allocator.free(self.key);
@@ -117,55 +129,56 @@ pub const Attention = struct {
 pub const MLP = struct {
     const Self = @This();
     key: []const u8,
-    intermediate: c_int,
-    gate_up_proj: mlx.Linear,
+    gate_proj: mlx.Linear,
     down_proj: mlx.Linear,
+    up_proj: mlx.Linear,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, intermediate: c_int, quant_config: ?mlx.QuantConfig, stream: mlx.Stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, quant_config: ?mlx.QuantConfig, stream: mlx.Stream) !Self {
         const key = try allocJoin(allocator, parent, name);
         errdefer allocator.free(key);
-        const gate_up_proj = try mlx.Linear.init(allocator, key, "gate_up_proj", false, quant_config, stream);
+        const gate_proj = try mlx.Linear.init(allocator, key, "gate_proj", false, quant_config, stream);
         const down_proj = try mlx.Linear.init(allocator, key, "down_proj", false, quant_config, stream);
+        const up_proj = try mlx.Linear.init(allocator, key, "up_proj", false, quant_config, stream);
         return Self{
             .key = key,
-            .gate_up_proj = gate_up_proj,
+            .gate_proj = gate_proj,
             .down_proj = down_proj,
+            .up_proj = up_proj,
             .stream = stream,
             .allocator = allocator,
-            .intermediate = intermediate,
         };
     }
 
     pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.gate_up_proj.load(weights_map);
+        try self.gate_proj.load(weights_map);
         try self.down_proj.load(weights_map);
+        try self.up_proj.load(weights_map);
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array) !void {
-        var gate_up = mlx.arrayNew();
         var gate = mlx.arrayNew();
         var up = mlx.arrayNew();
         // var silu = mlx.arrayNew();
         defer {
-            mlx.arrayFree(gate_up);
             mlx.arrayFree(gate);
             mlx.arrayFree(up);
             // mlx.arrayFree(silu);
         }
-        try self.gate_up_proj.forward(&gate_up, x);
-        try mlx.splitEqualParts(&.{ &gate, &up }, gate_up, 2, 2, self.stream);
+        try self.gate_proj.forward(&gate, x);
+        try self.up_proj.forward(&up, x);
         // try mlx.sigmoid(&silu, gate, self.stream);
         // try mlx.multiply(&gate, gate, silu, self.stream);
         try mlx.silu(&gate, gate, self.stream);
-        try mlx.multiply(&up, gate, up, self.stream);
-        try self.down_proj.forward(result, up);
+        try mlx.multiply(&gate, gate, up, self.stream);
+        try self.down_proj.forward(result, gate);
     }
 
     pub fn deinit(self: *Self) void {
-        self.gate_up_proj.deinit();
+        self.gate_proj.deinit();
         self.down_proj.deinit();
+        self.up_proj.deinit();
         self.allocator.free(self.key);
     }
 };
@@ -180,11 +193,11 @@ pub const TransformerBlock = struct {
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, layer_idx: usize, config: *const PhiConfig, stream: mlx.Stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, layer_idx: usize, config: *const QwenConfig, stream: mlx.Stream) !Self {
         const key = try allocJoin(allocator, parent, layer_idx);
         errdefer allocator.free(key);
         const self_attn = try Attention.init(allocator, key, "self_attn", config, stream);
-        const mlp = try MLP.init(allocator, key, "mlp", config.intermediate_size, config.quantization, stream);
+        const mlp = try MLP.init(allocator, key, "mlp", config.quantization, stream);
         const input_layernorm = try mlx.RMSNorm.init(allocator, key, "input_layernorm", config.rms_norm_eps, stream);
         const post_attention_layernorm = try mlx.RMSNorm.init(allocator, key, "post_attention_layernorm", config.rms_norm_eps, stream);
         return Self{
@@ -233,7 +246,7 @@ pub const TransformerBlock = struct {
     }
 };
 
-pub const Phi4Model = struct {
+pub const OlympicModel = struct {
     const Self = @This();
     key: []const u8,
     embed_tokens: mlx.Embedding,
@@ -242,7 +255,7 @@ pub const Phi4Model = struct {
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, config: *const PhiConfig, stream: mlx.Stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, config: *const QwenConfig, stream: mlx.Stream) !Self {
         const key = try allocator.dupe(u8, parent);
         errdefer allocator.free(key);
         const embed_tokens = try mlx.Embedding.init(allocator, key, "embed_tokens", config.quantization, stream);
@@ -304,18 +317,19 @@ pub const Phi4Model = struct {
 
 pub const Model = struct {
     const Self = @This();
-    model: Phi4Model,
+    model: OlympicModel,
     tie_word_embeddings: bool,
     lm_head: ?mlx.Linear,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, config: *const PhiConfig, stream: mlx.Stream) !Self {
-        const model = try Phi4Model.init(allocator, "model", config, stream);
+    pub fn init(allocator: std.mem.Allocator, config: *const QwenConfig, stream: mlx.Stream) !Self {
+        const model = try OlympicModel.init(allocator, "model", config, stream);
         const lm_head = if (!config.tie_word_embeddings)
             try mlx.Linear.init(allocator, "lm_head", "", false, config.quantization, stream)
         else
             null;
+
         return Self{
             .model = model,
             .tie_word_embeddings = config.tie_word_embeddings,
@@ -335,7 +349,9 @@ pub const Model = struct {
     pub fn forward(self: *Self, result: *mlx.Array, inputs: mlx.Array, mask: ?mlx.Array, cache: ?*mlx.Cache) !void {
         var out = mlx.arrayNew();
         defer mlx.arrayFree(out);
+
         try self.model.forward(&out, inputs, mask, cache);
+
         if (self.tie_word_embeddings) {
             try self.model.embed_tokens.asLinear(result, out);
         } else {
@@ -362,18 +378,21 @@ pub const Transformer = struct {
         var buf: [1024]u8 = undefined;
         const stream = mlx.defaultGpuStreamNew();
         const path_config = try std.fmt.bufPrintZ(&buf, "{s}/config.json", .{model_path});
-        const config = try loadJson(PhiConfig, allocator, path_config, true);
+        const config = try loadJson(QwenConfig, allocator, path_config, true);
         defer config.deinit();
-        const eos_token_id = try allocator.dupe(u32, &[_]u32{100265});
+
+        const eos_token_id = try allocator.dupe(u32, &[_]u32{config.value.eos_token_id});
         errdefer allocator.free(eos_token_id);
+
         var model = try Model.init(allocator, &config.value, stream);
         errdefer model.deinit();
-        const path_weight_1 = try std.fmt.bufPrintZ(&buf, "{s}/model-00001-of-00002.safetensors", .{model_path});
-        var safetensors = try mlx.Safetensors.load(path_weight_1, stream);
+
+        const path_weight = try std.fmt.bufPrintZ(&buf, "{s}/model.safetensors", .{model_path});
+        var safetensors = try mlx.Safetensors.load(path_weight, stream);
         defer safetensors.deinit();
-        const path_weight_2 = try std.fmt.bufPrintZ(&buf, "{s}/model-00002-of-00002.safetensors", .{model_path});
-        try safetensors.add(&[_][:0]const u8{path_weight_2}, allocator);
+
         try model.load(&safetensors.weights);
+
         return Self{
             .allocator = allocator,
             .stream = stream,
@@ -439,26 +458,25 @@ pub const Transformer = struct {
     }
 };
 
-pub const PhiConfig = struct {
-    bos_token_id: c_int = 100257,
-    eos_token_id: c_int = 100265,
-    hidden_size: c_int = 5120,
-    num_hidden_layers: c_int = 40,
-    intermediate_size: c_int = 17920,
-    num_attention_heads: c_int = 40,
-    num_key_value_heads: ?c_int = 10,
-    rms_norm_eps: f32 = 1e-5,
-    vocab_size: c_int = 100352,
-    rope_theta: f32 = 250000.0,
+pub const QwenConfig = struct {
+    bos_token_id: u32 = 151643,
+    eos_token_id: u32 = 151645,
+    hidden_size: c_int = 3584,
+    num_hidden_layers: c_int = 28,
+    intermediate_size: c_int = 18944,
+    num_attention_heads: c_int = 28,
+    num_key_value_heads: c_int = 4,
+    max_position_embeddings: c_int = 32768,
+    rms_norm_eps: f32 = 1e-6,
+    rope_theta: f32 = 1000000.0,
     rope_traditional: bool = false,
-    partial_rotary_factor: f32 = 1.0,
-    max_position_embeddings: c_int = 16384,
-    original_max_position_embeddings: c_int = 16384,
     tie_word_embeddings: bool = false,
+    vocab_size: c_int = 152064,
     quantization: ?mlx.QuantConfig = null,
     rope_scaling: ?RopeScalingConfig = null,
+
     pub const RopeScalingConfig = struct {
-        long_factor: f32 = 1.0,
+        factor: f32 = 1.0,
         type: []const u8 = "linear",
     };
 };

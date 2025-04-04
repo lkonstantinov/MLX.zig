@@ -4,6 +4,9 @@
 
 const std = @import("std");
 const Regex = @import("regex.zig").Regex;
+const formatDynamic = @import("utils.zig").formatDynamic;
+const formatRange = @import("utils.zig").formatRange;
+const formatRangeFloat = @import("utils.zig").formatRangeFloat;
 
 pub const Tokenizer = struct {
     const Self = @This();
@@ -316,6 +319,7 @@ pub const Tokenizer = struct {
     }
 
     pub fn encode(self: *Self, text: []const u8) ![]const u32 {
+        // std.debug.print("\nEncoded: {s}\n", .{text});
         var result = std.ArrayList(u32).init(self.allocator);
         errdefer result.deinit();
         var parts = try self.splitWithSpecials(text);
@@ -359,47 +363,19 @@ pub const Tokenizer = struct {
         return result.toOwnedSlice();
     }
 
-    pub fn encodeChat(self: *Self, comptime chat_format: ?[]const u8, system_message: []const u8, user_message: []const u8) ![]const u32 {
-        const format = chat_format orelse
-            \\<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-            \\
-            \\Cutting Knowledge Date: December 2023
-            \\Today Date: 26 Jul 2024
-            \\
-            \\{s}<|eot_id|><|start_header_id|>user<|end_header_id|>
-            \\
-            \\{s}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-            \\
-            \\
-        ;
-        const formatted = try std.fmt.allocPrint(self.allocator, format, .{ system_message, user_message });
+    pub fn encodeChat(self: *Self, chat_format: ?[]const u8, replacements: []const []const u8) ![]const u32 {
+        if (chat_format == null) {
+            if (replacements.len != 1) {
+                return error.ReplacementCountMismatch;
+            }
+            return self.encode(replacements[0]);
+        }
+        const format = chat_format.?;
+        const formatted = try formatDynamic(self.allocator, format, replacements);
         defer self.allocator.free(formatted);
         return self.encode(formatted);
     }
 };
-
-pub fn formatRange(comptime format: []const u8, comptime start: usize, comptime end: usize) [end - start][]const u8 {
-    var result: [end - start][]const u8 = undefined;
-    inline for (&result, 0..) |*ptr, i| {
-        ptr.* = std.fmt.comptimePrint(format, .{start + i});
-    }
-    return result;
-}
-
-pub fn formatRangeFloat(comptime count: usize) [count][]const u8 {
-    var result: [count][]const u8 = undefined;
-    inline for (&result, 0..) |*ptr, i| {
-        const seconds = @as(f32, @floatFromInt(i)) * 0.02;
-        const whole = @as(u32, @intFromFloat(seconds));
-        const frac = @as(u32, @intFromFloat((seconds - @as(f32, @floatFromInt(whole))) * 100.0 + 0.5)); // +0.5 for rounding
-        if (frac < 10) {
-            ptr.* = std.fmt.comptimePrint("<|{d}.0{d}|>", .{ whole, frac });
-        } else {
-            ptr.* = std.fmt.comptimePrint("<|{d}.{d}|>", .{ whole, frac });
-        }
-    }
-    return result;
-}
 
 test "Tokenizer round-trip" {
     std.debug.print("\n=== TOKENIZER.ZIG ===\n\n", .{});

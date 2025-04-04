@@ -1,4 +1,4 @@
-//! phi.zig - Entry point for the Phi-4 cli app
+//! phi_main.zig - Entry point for the Phi-4 cli app
 //!
 //! Copyright 2025 Joe
 
@@ -34,7 +34,7 @@ pub fn main() !void {
     defer tokenizer.deinit();
     var transformer = try Transformer.init(allocator, model_name);
     defer transformer.deinit();
-    const input_ids = try tokenizer.encodeChat(chat_format, sys_prompt, user_input);
+    const input_ids = try tokenizer.encodeChat(chat_format, &.{ sys_prompt, user_input });
     defer allocator.free(input_ids);
     const output_ids = try transformer.generate(input_ids, num_tokens);
     defer allocator.free(output_ids);
@@ -64,7 +64,7 @@ test "Phi-4-2bit cli" {
     defer tokenizer.deinit();
     var transformer = try Transformer.init(allocator, model_name);
     defer transformer.deinit();
-    const input_ids = try tokenizer.encodeChat(chat_format, sys_prompt, user_input);
+    const input_ids = try tokenizer.encodeChat(chat_format, &.{ sys_prompt, user_input });
     defer allocator.free(input_ids);
     const output_ids = try transformer.generate(input_ids, num_tokens);
     defer allocator.free(output_ids);

@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const allocJoin = @import("utils.zig").allocJoin;
+const comptimeJoin = @import("utils.zig").comptimeJoin;
 pub const C = @cImport({
     @cInclude("mlx/c/mlx.h");
     @cInclude("stdio.h");
@@ -251,12 +252,28 @@ pub fn concatenate(result: *C.mlx_array, arrays: anytype, axis: c_int, stream: C
     try mlxOp(C.mlx_concatenate(result, vector_arrays, axis, stream));
 }
 
+pub fn split(outputs: []const *C.mlx_array, a: C.mlx_array, indices: []const c_int, axis: c_int, stream: C.mlx_stream) !void {
+    var results = C.mlx_vector_array_new();
+    defer _ = C.mlx_vector_array_free(results);
+    try mlxOp(C.mlx_split(&results, a, indices.ptr, indices.len, axis, stream));
+    for (outputs, 0..) |out_ptr, i| {
+        try mlxOp(C.mlx_vector_array_get(out_ptr, results, i));
+    }
+}
+
+pub fn splitEqualParts(outputs: []const *C.mlx_array, a: C.mlx_array, num_splits: c_int, axis: c_int, stream: C.mlx_stream) !void {
+    var results = C.mlx_vector_array_new();
+    defer _ = C.mlx_vector_array_free(results);
+    try mlxOp(C.mlx_split_equal_parts(&results, a, num_splits, axis, stream));
+    for (outputs, 0..) |out_ptr, i| {
+        try mlxOp(C.mlx_vector_array_get(out_ptr, results, i));
+    }
+}
+
 pub fn item(dest: anytype, arr: C.mlx_array) !void {
     const T = @TypeOf(dest);
     const info = @typeInfo(T);
-
     if (info != .Pointer) @compileError("Expected pointer, got " ++ @typeName(T));
-
     const child = info.Pointer.child;
     const func_name = switch (child) {
         u32, c_uint => "mlx_array_item_uint32",
@@ -272,22 +289,18 @@ pub fn item(dest: anytype, arr: C.mlx_array) !void {
         i64 => "mlx_array_item_int64",
         else => @compileError("Unsupported item type: " ++ @typeName(child)),
     };
-
     try mlxOp(@field(C, func_name)(dest, arr));
 }
 
 pub fn arraySetData(arr: *C.mlx_array, data: *const anyopaque, shape_arg: anytype, dtype: C.mlx_dtype) !void {
     var shape: [32]c_int = undefined;
     var len: usize = 0;
-
     const T = @TypeOf(shape_arg);
     const fields = @typeInfo(T).Struct.fields;
-
     inline for (fields, 0..) |field, idx| {
         shape[idx] = @intCast(@field(shape_arg, field.name));
         len = idx + 1;
     }
-
     try mlxOp(C.mlx_array_set_data(arr, data, &shape, @intCast(len), dtype));
 }
 
@@ -296,12 +309,10 @@ pub fn arrayNewData(data: *const anyopaque, shape_arg: anytype, dtype: C.mlx_dty
     var len: usize = 0;
     const T = @TypeOf(shape_arg);
     const fields = @typeInfo(T).Struct.fields;
-
     inline for (fields, 0..) |field, idx| {
         shape[idx] = @intCast(@field(shape_arg, field.name));
         len = idx + 1;
     }
-
     const arr = C.mlx_array_new_data(data, &shape, @intCast(len), dtype);
     if (arr.ctx == null) return error.FailedToCreateArray;
     return arr;
@@ -464,13 +475,12 @@ pub fn ones(result: *C.mlx_array, shape: []const c_int, dtype: C.mlx_dtype, stre
     try mlxOp(C.mlx_ones(result, shape.ptr, shape.len, dtype, stream));
 }
 
-pub fn split(outputs: anytype, a: C.mlx_array, indices: []const c_int, axis: c_int, stream: C.mlx_stream) !void {
-    var results = C.mlx_vector_array_new();
-    defer _ = C.mlx_vector_array_free(results);
-    try mlxOp(C.mlx_split(&results, a, indices.ptr, indices.len, axis, stream));
-    inline for (std.meta.fields(@TypeOf(outputs)), 0..) |field, i| {
-        try mlxOp(C.mlx_vector_array_get(@field(outputs, field.name), results, i));
-    }
+pub fn zeros(result: *C.mlx_array, shape: []const c_int, dtype: C.mlx_dtype, stream: C.mlx_stream) !void {
+    try mlxOp(C.mlx_zeros(result, shape.ptr, shape.len, dtype, stream));
+}
+
+pub fn arraySet(arr: *C.mlx_array, src: C.mlx_array) !void {
+    try mlxOp(C.mlx_array_set(arr, src));
 }
 
 pub fn arrayFree(arr: C.mlx_array) void {
@@ -742,13 +752,20 @@ pub const Conv1d = struct {
 };
 
 pub fn gelu(result: *Array, x: Array, stream: Stream) !void {
-    var erf_x = arrayNew();
-    defer arrayFree(erf_x);
-    try divide(&erf_x, x, float(@sqrt(2.0)), stream);
-    try mlxOp(C.mlx_erf(&erf_x, erf_x, stream));
-    try add(&erf_x, erf_x, float(1.0), stream);
-    try multiply(&erf_x, erf_x, float(0.5), stream);
-    try multiply(result, x, erf_x, stream);
+    var tmp = arrayNew();
+    defer arrayFree(tmp);
+    try divide(&tmp, x, float(@sqrt(2.0)), stream);
+    try mlxOp(C.mlx_erf(&tmp, tmp, stream));
+    try add(&tmp, tmp, float(1.0), stream);
+    try multiply(&tmp, tmp, float(0.5), stream);
+    try multiply(result, x, tmp, stream);
+}
+
+pub fn silu(result: *Array, x: Array, stream: Stream) !void {
+    var tmp = arrayNew();
+    defer arrayFree(tmp);
+    try mlxOp(C.mlx_sigmoid(&tmp, x, stream));
+    try mlxOp(C.mlx_multiply(result, tmp, x, stream));
 }
 
 /// ============================================================================
@@ -987,6 +1004,8 @@ pub const Safetensors = struct {
     file: ?*C.FILE,
     weights: C.mlx_map_string_to_array,
     stream: C.mlx_stream,
+    added_tensors: ?std.ArrayList(Self),
+    allocator: ?std.mem.Allocator,
 
     pub fn load(path_safetensors: [:0]const u8, stream: C.mlx_stream) !Self {
         const file = C.fopen(path_safetensors.ptr, "rb") orelse return error.FileNotFound;
@@ -1002,19 +1021,46 @@ pub const Safetensors = struct {
             _ = C.mlx_map_string_to_array_free(weights);
             return error.LoadWeightsFailed;
         }
-        // try printMapStr("Metadata", &meta);
-        // try printMapArr("Weights", &weights);
         return Self{
             .file = file,
             .weights = weights,
             .stream = stream,
+            .added_tensors = null,
+            .allocator = null,
         };
+    }
+
+    pub fn add(self: *Self, paths: []const [:0]const u8, allocator: std.mem.Allocator) !void {
+        if (self.added_tensors == null) {
+            self.added_tensors = std.ArrayList(Self).init(allocator);
+            self.allocator = allocator;
+        }
+        for (paths) |path| {
+            const tensor = try Self.load(path, self.stream);
+            const add_iter = C.mlx_map_string_to_array_iterator_new(tensor.weights);
+            defer _ = C.mlx_map_string_to_array_iterator_free(add_iter);
+            var key: [*c]const u8 = undefined;
+            var value = C.mlx_array_new();
+            defer _ = C.mlx_array_free(value);
+            while (C.mlx_map_string_to_array_iterator_next(&key, &value, add_iter) == 0) {
+                _ = C.mlx_map_string_to_array_insert(self.weights, key, value);
+            }
+            try self.added_tensors.?.append(tensor);
+        }
     }
 
     pub fn deinit(self: *Self) void {
         if (self.file) |file| {
             _ = C.fclose(file);
             self.file = null;
+        }
+        if (self.added_tensors) |*tensors| {
+            for (tensors.items) |*tensor| {
+                var tensor_copy = tensor.*;
+                tensor_copy.added_tensors = null;
+                tensor_copy.deinit();
+            }
+            tensors.deinit();
         }
         _ = C.mlx_map_string_to_array_free(self.weights);
     }
@@ -1065,24 +1111,18 @@ pub fn printMapStr(msg: []const u8, map: *C.mlx_map_string_to_string) !void {
 pub fn printMapArr(msg: []const u8, map: *const C.mlx_map_string_to_array) !void {
     const map_iter = C.mlx_map_string_to_array_iterator_new(map.*);
     defer _ = C.mlx_map_string_to_array_iterator_free(map_iter);
-
     var key: [*c]const u8 = undefined;
     var value = C.mlx_array_new();
     defer _ = C.mlx_array_free(value);
-
     std.debug.print("\n{s}:\n", .{msg});
-
     while (C.mlx_map_string_to_array_iterator_next(&key, &value, map_iter) == 0) {
         const ndim = C.mlx_array_ndim(value);
         const shape = C.mlx_array_shape(value);
-
         std.debug.print("  {s}: shape=[", .{key});
-
         for (0..ndim) |idx| {
             if (idx > 0) std.debug.print(", ", .{});
             std.debug.print("{d}", .{shape[idx]});
         }
-
         std.debug.print("]\n", .{});
     }
 }
@@ -1090,19 +1130,6 @@ pub fn printMapArr(msg: []const u8, map: *const C.mlx_map_string_to_array) !void
 /// ============================================================================
 /// Experimental Array Shape Operations
 /// ============================================================================
-/// CAUTION: These functions are experimental implementations of einops-like
-/// operations with significant limitations. They are poorly optimized and are
-/// GUARANTEED to fail for most common use cases and should be considered prototypes
-/// rather than production-ready.
-///
-/// Limitations include:
-/// - Expecting a specific format with parentheses at exact positions in the pattern
-/// - Only supporting a small subset of simple patterns
-/// - Lacking proper error handling for many edge cases (may silently produce incorrect
-///   results for unsupported patterns)
-///
-/// Use standard MLX reshape/transpose or repeat operations for production code and these
-/// functions only when you've thoroughly tested them with your specific patterns.
 pub fn rEpeat(result: *C.mlx_array, x: C.mlx_array, comptime pattern: []const u8, dim_values: anytype, stream: C.mlx_stream) !void {
     const n_repeat: c_int = inline for (std.meta.fields(@TypeOf(dim_values))) |field| break @field(dim_values, field.name);
     const axis = comptime blk: {
@@ -1110,60 +1137,57 @@ pub fn rEpeat(result: *C.mlx_array, x: C.mlx_array, comptime pattern: []const u8
         var i: c_int = 0;
         while (tokens.next()) |token| : (i += 1) if (token[0] == '(') break :blk i;
     };
-    try mlxOp(C.mlx_repeat(result, x, @intCast(n_repeat), @intCast(axis), stream));
+    try mlxOp(C.mlx_repeat(result, x, n_repeat, axis, stream));
 }
 
 pub fn rEshap(result: *C.mlx_array, x: C.mlx_array, comptime pattern: []const u8, dim_values: anytype, stream: C.mlx_stream) !void {
-    const arrow = comptime std.mem.indexOf(u8, pattern, "->").?;
-    const popen = comptime std.mem.indexOf(u8, pattern, "(").?;
-    const pclos = comptime std.mem.indexOf(u8, pattern, ")").?;
-    const is_lt = comptime popen < arrow;
-    const side = comptime if (is_lt) pattern[0..popen] else pattern[arrow + 2 .. popen];
-    var toks_1 = comptime std.mem.tokenize(u8, side, " ");
-    var toks_2 = comptime std.mem.tokenize(u8, pattern[popen + 1 .. pclos], " ");
-    var toks_3 = comptime std.mem.tokenizeAny(u8, pattern[0..arrow], " ()");
-    var toks_4 = comptime std.mem.tokenizeAny(u8, pattern[arrow + 2 ..], " ()");
-    var a: ?c_int = null;
-    var b: ?c_int = null;
-    var c: c_int = 0;
-    while (toks_3.next()) |t3| : (c += 1) {
-        if (!std.mem.eql(u8, t3, toks_4.next().?)) {
-            if (a != null) {
-                b = c;
-                break;
-            } else {
-                a = c;
-            }
+    const args = comptime blk: {
+        const arrow = std.mem.indexOf(u8, pattern, "->").?;
+        const popen = std.mem.indexOf(u8, pattern, "(").?;
+        const pclos = std.mem.indexOf(u8, pattern, ")").?;
+        const is_lt = popen < arrow;
+
+        const axis_start = a1: {
+            const side = if (is_lt) pattern[0..popen] else pattern[arrow + 2 .. popen];
+            var toks_1 = std.mem.tokenize(u8, side, " ");
+            var i = 0;
+            while (toks_1.next()) |_| i += 1;
+            break :a1 i;
+        };
+        var shape: [16][]const u8 = undefined;
+        var toks_2 = std.mem.tokenize(u8, pattern[popen + 1 .. pclos], " ");
+        var i: usize = 0;
+        while (toks_2.next()) |tok| : (i += 1) {
+            shape[i] = tok;
         }
-    }
-    var tmp = arrayNew();
-    defer arrayFree(tmp);
-    if (!is_lt and a != null) {
-        try mlxOp(C.mlx_swapaxes(&tmp, x, a.?, b.?, stream));
-    } else {
-        try mlxOp(C.mlx_array_set(&tmp, x));
-    }
-    const i_shape = C.mlx_array_shape(tmp);
-    var shape: [16]c_int = undefined;
-    var i: usize = 0;
-    while (toks_1.next()) |_| : (i += 1) shape[i] = i_shape[i];
-    if (is_lt) {
-        while (toks_2.next()) |tok| {
-            inline for (std.meta.fields(@TypeOf(dim_values))) |f| {
-                if (std.mem.eql(u8, tok, f.name)) {
-                    shape[i] = @field(dim_values, f.name);
-                    i += 1;
+        const axis_end = axis_start + i - 1; // flatten end index is inclusive
+        var toks_3 = std.mem.tokenizeAny(u8, pattern[0..arrow], " ()");
+        var toks_4 = std.mem.tokenizeAny(u8, pattern[arrow + 2 ..], " ()");
+        var swap_start: ?c_int = null;
+        var swap_end: ?c_int = null;
+        var c: c_int = 0;
+        while (toks_3.next()) |t3| : (c += 1) {
+            if (!std.mem.eql(u8, t3, toks_4.next().?)) {
+                if (swap_start != null) {
+                    swap_end = c;
+                    break;
+                } else {
+                    swap_start = c;
                 }
             }
         }
+        break :blk .{ .is_lt = is_lt, .axis_start = axis_start, .axis_end = axis_end, .shape = shape[0..i].*, .swap_start = swap_start, .swap_end = swap_end };
+    };
+    try arraySet(result, x);
+    if (args.is_lt) {
+        var shape: [args.shape.len]c_int = undefined;
+        inline for (args.shape, 0..) |tok, i| {
+            shape[i] = @field(dim_values, tok);
+        }
+        try mlxOp(C.mlx_unflatten(result, result.*, args.axis_start, &shape, args.shape.len, stream));
+        if (args.swap_start != null) try mlxOp(C.mlx_swapaxes(result, result.*, args.swap_start.?, args.swap_end.?, stream));
     } else {
-        shape[i] = -1;
-        i += 1;
-    }
-    try mlxOp(C.mlx_reshape(&tmp, tmp, &shape, i, stream));
-    if (is_lt and a != null) {
-        try mlxOp(C.mlx_swapaxes(result, tmp, a.?, b.?, stream));
-    } else {
-        try mlxOp(C.mlx_array_set(result, tmp));
+        if (args.swap_start != null) try mlxOp(C.mlx_swapaxes(result, result.*, args.swap_start.?, args.swap_end.?, stream));
+        try mlxOp(C.mlx_flatten(result, result.*, args.axis_start, args.axis_end, stream));
     }
 }

@@ -9,7 +9,6 @@ pub fn build(b: *std.Build) !void {
     const install_step = b.step("install-mlx-c", "Install MLX-C if needed");
     const needs_install = !doesFileExist(mlx_c_lib_path);
     if (needs_install) {
-        // const clone_cmd = b.addSystemCommand(&[_][]const u8{ "sh", "-c", b.fmt("if [ ! -d {s} ]; then git clone https://github.com/ml-explore/mlx-c.git {s}; fi", .{ mlx_c_path, mlx_c_path }) });
         const clone_cmd = b.addSystemCommand(&[_][]const u8{ "sh", "-c", b.fmt("if [ ! -d {s} ]; then mkdir -p $(dirname {s}) && curl -L https://github.com/ml-explore/mlx-c/archive/refs/tags/v0.1.2.tar.gz | tar xz -C $(dirname {s}) && mv $(dirname {s})/mlx-c-0.1.2 {s}; fi", .{ mlx_c_path, mlx_c_path, mlx_c_path, mlx_c_path, mlx_c_path }) });
         const mkdir_cmd = b.addSystemCommand(&[_][]const u8{ "mkdir", "-p", mlx_c_build_path });
         mkdir_cmd.step.dependOn(&clone_cmd.step);
@@ -43,6 +42,12 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
+    const llm_exe = b.addExecutable(.{
+        .name = "llm",
+        .root_source_file = b.path("src/llm_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const main_exe = if (doesFileExist("src/main.zig")) b.addExecutable(.{
         .name = "main",
         .root_source_file = b.path("src/main.zig"),
@@ -52,12 +57,14 @@ pub fn build(b: *std.Build) !void {
     configureExecutable(whisper_exe, b, mlx_c_path, mlx_c_build_path, pcre2_dep, install_step);
     configureExecutable(llama_exe, b, mlx_c_path, mlx_c_build_path, pcre2_dep, install_step);
     configureExecutable(phi_exe, b, mlx_c_path, mlx_c_build_path, pcre2_dep, install_step);
+    configureExecutable(llm_exe, b, mlx_c_path, mlx_c_build_path, pcre2_dep, install_step);
     if (main_exe) |exe| {
         configureExecutable(exe, b, mlx_c_path, mlx_c_build_path, pcre2_dep, install_step);
     }
     b.installArtifact(whisper_exe);
     b.installArtifact(llama_exe);
     b.installArtifact(phi_exe);
+    b.installArtifact(llm_exe);
     if (main_exe) |exe| {
         b.installArtifact(exe);
     }
@@ -71,8 +78,11 @@ pub fn build(b: *std.Build) !void {
     const run_llama = b.step("run-llama", "Run the llama chat app");
     run_llama.dependOn(&llama_run.step);
     const phi_run = b.addRunArtifact(phi_exe);
-    const run_phi = b.step("run-phi", "Run the phi demo");
+    const run_phi = b.step("run-phi", "Run the phi cli");
     run_phi.dependOn(&phi_run.step);
+    const llm_run = b.addRunArtifact(llm_exe);
+    const run_llm = b.step("run-llm", "Run the llm demo");
+    run_llm.dependOn(&llm_run.step);
     if (main_exe) |exe| {
         const main_run = b.addRunArtifact(exe);
         const run_main = b.step("run", "Run the main app");
@@ -97,16 +107,32 @@ pub fn build(b: *std.Build) !void {
         \\
         \\  zig build                           - Builds all executables and installs to zig-out/bin
         \\  zig build run-whisper -- [file]     - Builds and runs whisper with optional audio file
-        \\  zig build run-phi                   - Builds and runs phi demo
+        \\  zig build run-phi                   - Builds and runs phi cli
         \\  zig build run-llama                 - Builds and runs llama chat
+        \\  zig build run-llm                   - Builds and runs llm (qwen, olympic, phi, llama)
         \\  zig build run                       - Builds and runs main.zig (for development/testing)
         \\
-        \\Direct executable usage:
+        \\Exe Usage:
         \\
         \\  zig-out/bin/whisper [audio_file]    - Run whisper with optional audio file
         \\  zig-out/bin/phi [prompt]            - Run phi with optional user prompt
         \\  zig-out/bin/llama                   - Run llama chat
         \\  zig-out/bin/main                    - Run main app with build instructions
+        \\  zig-out/bin/llm [options] [input]    - Run llm app (see below)
+        \\
+        \\LLM Usage: llm [options] [input]
+        \\
+        \\Options:
+        \\  --model-type=TYPE       Model type: llama, phi, qwen, olympic (default: llama)
+        \\  --model-name=NAME       Model name to download/use
+        \\  --system-prompt=PROMPT  System prompt for the model
+        \\  --num-tokens=N          Number of tokens to generate
+        \\  --help                  Show this help
+        \\
+        \\Examples:
+        \\  llm "Hi mom!"
+        \\  llm --model-type=phi "How should I explain the Internet?"
+        \\  llm --model-type=olympic "Write a python function to check if a number is prime"
         \\
     });
     help_step.dependOn(&help_msg.step);
