@@ -40,7 +40,7 @@ pub const ModelConfig = struct {
     chat_content: []const []const u8,
     required_files: ?[]const []const u8 = null,
     allocator: std.mem.Allocator,
-    transformer: TransformerUnion,
+    transformer: ?TransformerUnion = null,
 
     pub fn init(allocator: std.mem.Allocator, model_type: ModelType) !Self {
         var content = std.ArrayList([]const u8).init(allocator);
@@ -51,7 +51,7 @@ pub const ModelConfig = struct {
             .model_name = undefined,
             .chat_content = undefined,
             .allocator = allocator,
-            .transformer = undefined,
+            .transformer = null,
         };
 
         switch (model_type) {
@@ -118,14 +118,19 @@ pub const ModelConfig = struct {
                 try content.append("Write a python program to calculate the 10th fibonacci number");
             },
         }
-        config.transformer = switch (model_type) {
-            .llama => .{ .llama = try LlamaTransformer.init(allocator, config.model_name) },
-            .phi => .{ .phi = try PhiTransformer.init(allocator, config.model_name) },
-            .qwen_coder => .{ .qwen_coder = try QwenTransformer.init(allocator, config.model_name) },
-            .olympic_coder => .{ .olympic_coder = try QwenTransformer.init(allocator, config.model_name) },
-        };
         config.chat_content = try content.toOwnedSlice();
         return config;
+    }
+
+    pub fn loadTransformer(self: *Self) !void {
+        if (self.transformer != null) return;
+
+        self.transformer = switch (self.model_type) {
+            .llama => .{ .llama = try LlamaTransformer.init(self.allocator, self.model_name) },
+            .phi => .{ .phi = try PhiTransformer.init(self.allocator, self.model_name) },
+            .qwen_coder => .{ .qwen_coder = try QwenTransformer.init(self.allocator, self.model_name) },
+            .olympic_coder => .{ .olympic_coder = try QwenTransformer.init(self.allocator, self.model_name) },
+        };
     }
 
     pub fn deinit(self: *Self) void {
@@ -133,11 +138,13 @@ pub const ModelConfig = struct {
             self.allocator.free(files);
         }
         self.allocator.free(self.chat_content);
-        switch (self.transformer) {
-            .llama => |*t| t.deinit(),
-            .phi => |*t| t.deinit(),
-            .qwen_coder => |*t| t.deinit(),
-            .olympic_coder => |*t| t.deinit(),
+        if (self.transformer) |*t| {
+            switch (t.*) {
+                .llama => |*transformer| transformer.deinit(),
+                .phi => |*transformer| transformer.deinit(),
+                .qwen_coder => |*transformer| transformer.deinit(),
+                .olympic_coder => |*transformer| transformer.deinit(),
+            }
         }
     }
 
@@ -146,13 +153,16 @@ pub const ModelConfig = struct {
         self.chat_content = try self.allocator.dupe([]const u8, content);
     }
 
-    pub fn generate(self: *Self, token_ids: []const u32) ![]const u32 {
-        return switch (self.transformer) {
-            .llama => |*t| t.generate(token_ids, self.num_tokens),
-            .phi => |*t| t.generate(token_ids, self.num_tokens),
-            .qwen_coder => |*t| t.generate(token_ids, self.num_tokens),
-            .olympic_coder => |*t| t.generate(token_ids, self.num_tokens),
-        };
+    pub fn generate(self: *Self, token_ids: []const u32) ![]u32 {
+        if (self.transformer) |*t| {
+            return switch (t.*) {
+                .llama => |*transformer| transformer.generate(token_ids, self.num_tokens),
+                .phi => |*transformer| transformer.generate(token_ids, self.num_tokens),
+                .qwen_coder => |*transformer| transformer.generate(token_ids, self.num_tokens),
+                .olympic_coder => |*transformer| transformer.generate(token_ids, self.num_tokens),
+            };
+        }
+        return error.TransformerNotInitialized;
     }
 };
 
@@ -160,11 +170,15 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
+
     var model_type: ModelType = .llama;
     var num_tokens: usize = 30;
     var model_name: ?[]const u8 = null;
-    var content_list = std.ArrayList([]const u8).init(allocator);
-    defer content_list.deinit();
+    var system_prompt: ?[]const u8 = null;
+
+    var replacements = std.ArrayList([]const u8).init(allocator);
+    defer replacements.deinit();
+
     const process_args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, process_args);
 
@@ -181,7 +195,7 @@ pub fn main() !void {
                 } else if (std.mem.eql(u8, key, "model-name")) {
                     model_name = value;
                 } else if (std.mem.eql(u8, key, "system-prompt")) {
-                    try content_list.append(value);
+                    system_prompt = value;
                 } else if (std.mem.eql(u8, key, "num-tokens")) {
                     num_tokens = try std.fmt.parseInt(usize, value, 10);
                 }
@@ -190,19 +204,30 @@ pub fn main() !void {
                 std.process.exit(0);
             }
         } else {
-            try content_list.append(arg);
+            try replacements.append(arg);
+        }
+    }
+
+    if (system_prompt) |prompt| {
+        try replacements.insert(0, prompt);
+    } else if (replacements.items.len > 0) {
+        if (model_type == .llama or model_type == .phi) {
+            try replacements.insert(0, "You are a helpful assistant.");
         }
     }
 
     var config = try ModelConfig.init(allocator, model_type);
     defer config.deinit();
+
     if (model_name) |name| {
         config.model_name = name;
     }
     config.num_tokens = num_tokens;
-    if (content_list.items.len > 0) {
-        try config.setContent(content_list.items);
+
+    if (replacements.items.len > 0) {
+        try config.setContent(replacements.items);
     }
+
     try runModel(&config);
 }
 
@@ -213,6 +238,9 @@ fn runModel(config: *ModelConfig) !void {
     std.debug.print("Initializing tokenizer\n", .{});
     var tokenizer = try Tokenizer.init(config.allocator, config.model_name);
     defer tokenizer.deinit();
+
+    std.debug.print("Loading transformer\n", .{});
+    try config.loadTransformer();
 
     std.debug.print("Encoding input\n", .{});
     const input_ids = try tokenizer.encodeChat(config.chat_format, config.chat_content);
