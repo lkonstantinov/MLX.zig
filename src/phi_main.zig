@@ -45,8 +45,7 @@ pub fn main() !void {
 
 test "Phi-4-2bit cli" {
     std.debug.print("\n=== PHI_MAIN.ZIG ===\n\n", .{});
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
+    const allocator = std.testing.allocator;
     const chat_format =
         \\<|im_start|>system<|im_sep|>
         \\{s}<|im_end|>

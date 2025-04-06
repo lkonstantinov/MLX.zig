@@ -15,14 +15,13 @@ pub const RoPE = struct {
     stream: mlx.Stream,
     rope_scaling: ?QwenConfig.RopeScalingConfig,
 
-    pub fn init(dims: c_int, base_: f32, scaling_config: ?QwenConfig.RopeScalingConfig, max_position_embeddings: c_int, stream: mlx.Stream) !Self {
-        _ = max_position_embeddings;
+    pub fn init(dims: c_int, base_: f32, scaling_config: ?QwenConfig.RopeScalingConfig, stream: mlx.Stream) !Self {
         var freqs = mlx.arrayNew();
         try mlx.arange(&freqs, 0, @floatFromInt(dims), 2, mlx.DTYPE.FLOAT32, stream);
         try mlx.divide(&freqs, freqs, mlx.float(@floatFromInt(dims)), stream);
         try mlx.power(&freqs, mlx.float(base_), freqs, stream);
         const base = mlx.OptionalFloat{ .has_value = false, .value = 0.0 };
-        return Self{
+        return .{
             .dims = dims,
             .base = base,
             .freqs = freqs,
@@ -42,36 +41,33 @@ pub const RoPE = struct {
 
 pub const Attention = struct {
     const Self = @This();
-    key: []const u8,
     n_heads: c_int,
     n_kv_heads: c_int,
     head_dim: c_int,
     scale: f32,
-    q_proj: mlx.Linear,
-    k_proj: mlx.Linear,
-    v_proj: mlx.Linear,
-    o_proj: mlx.Linear,
+    q_proj: *mlx.Linear,
+    k_proj: *mlx.Linear,
+    v_proj: *mlx.Linear,
+    o_proj: *mlx.Linear,
     rope: RoPE,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, config: *const QwenConfig, stream: mlx.Stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, config: *const QwenConfig, weights_hash: *std.StringHashMap(*mlx.Array), stream: mlx.Stream) !Self {
+        var allocs_to_free = std.ArrayList([]const u8).init(allocator);
         const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
+        try allocs_to_free.append(key);
         const n_heads = config.num_attention_heads;
         const n_kv_heads = config.num_key_value_heads;
         const head_dim = @divExact(config.hidden_size, n_heads);
         const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
-
-        const q_proj = try mlx.Linear.init(allocator, key, "q_proj", true, config.quantization, stream);
-        const k_proj = try mlx.Linear.init(allocator, key, "k_proj", true, config.quantization, stream);
-        const v_proj = try mlx.Linear.init(allocator, key, "v_proj", true, config.quantization, stream);
-        const o_proj = try mlx.Linear.init(allocator, key, "o_proj", false, config.quantization, stream);
-
-        const rope = try RoPE.init(head_dim, config.rope_theta, config.rope_scaling, config.max_position_embeddings, stream);
-
-        return Self{
-            .key = key,
+        const q_proj = try mlx.Linear.init(allocator, key, "q_proj", true, config.quantization, weights_hash, stream);
+        const k_proj = try mlx.Linear.init(allocator, key, "k_proj", true, config.quantization, weights_hash, stream);
+        const v_proj = try mlx.Linear.init(allocator, key, "v_proj", true, config.quantization, weights_hash, stream);
+        const o_proj = try mlx.Linear.init(allocator, key, "o_proj", false, config.quantization, weights_hash, stream);
+        const rope = try RoPE.init(head_dim, config.rope_theta, config.rope_scaling, stream);
+        return .{
             .n_heads = n_heads,
             .n_kv_heads = n_kv_heads,
             .head_dim = head_dim,
@@ -83,14 +79,18 @@ pub const Attention = struct {
             .rope = rope,
             .stream = stream,
             .allocator = allocator,
+            .allocs_to_free = allocs_to_free,
         };
     }
 
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.q_proj.load(weights_map);
-        try self.k_proj.load(weights_map);
-        try self.v_proj.load(weights_map);
-        try self.o_proj.load(weights_map);
+    pub fn deinit(self: *Self) void {
+        self.q_proj.deinit();
+        self.k_proj.deinit();
+        self.v_proj.deinit();
+        self.o_proj.deinit();
+        self.rope.deinit();
+        for (self.allocs_to_free.items) |allocation| self.allocator.free(allocation);
+        self.allocs_to_free.deinit();
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array, mask: ?mlx.Array, cache: ?*mlx.KVCache, offset: c_int) !void {
@@ -115,107 +115,93 @@ pub const Attention = struct {
         try mlx.rEshap(result, result.*, "b h l d -> b l (h d)", .{}, self.stream);
         try self.o_proj.forward(result, result.*);
     }
-
-    pub fn deinit(self: *Self) void {
-        self.q_proj.deinit();
-        self.k_proj.deinit();
-        self.v_proj.deinit();
-        self.o_proj.deinit();
-        self.rope.deinit();
-        self.allocator.free(self.key);
-    }
 };
 
 pub const MLP = struct {
     const Self = @This();
-    key: []const u8,
-    gate_proj: mlx.Linear,
-    down_proj: mlx.Linear,
-    up_proj: mlx.Linear,
+    gate_proj: *mlx.Linear,
+    down_proj: *mlx.Linear,
+    up_proj: *mlx.Linear,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, quant_config: ?mlx.QuantConfig, stream: mlx.Stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, quant_config: ?mlx.QuantConfig, weights_hash: *std.StringHashMap(*mlx.Array), stream: mlx.Stream) !Self {
+        var allocs_to_free = std.ArrayList([]const u8).init(allocator);
         const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
-        const gate_proj = try mlx.Linear.init(allocator, key, "gate_proj", false, quant_config, stream);
-        const down_proj = try mlx.Linear.init(allocator, key, "down_proj", false, quant_config, stream);
-        const up_proj = try mlx.Linear.init(allocator, key, "up_proj", false, quant_config, stream);
-        return Self{
-            .key = key,
+        try allocs_to_free.append(key);
+        const gate_proj = try mlx.Linear.init(allocator, key, "gate_proj", false, quant_config, weights_hash, stream);
+        const down_proj = try mlx.Linear.init(allocator, key, "down_proj", false, quant_config, weights_hash, stream);
+        const up_proj = try mlx.Linear.init(allocator, key, "up_proj", false, quant_config, weights_hash, stream);
+        return .{
             .gate_proj = gate_proj,
             .down_proj = down_proj,
             .up_proj = up_proj,
             .stream = stream,
             .allocator = allocator,
+            .allocs_to_free = allocs_to_free,
         };
-    }
-
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.gate_proj.load(weights_map);
-        try self.down_proj.load(weights_map);
-        try self.up_proj.load(weights_map);
-    }
-
-    pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array) !void {
-        var gate = mlx.arrayNew();
-        var up = mlx.arrayNew();
-        // var silu = mlx.arrayNew();
-        defer {
-            mlx.arrayFree(gate);
-            mlx.arrayFree(up);
-            // mlx.arrayFree(silu);
-        }
-        try self.gate_proj.forward(&gate, x);
-        try self.up_proj.forward(&up, x);
-        // try mlx.sigmoid(&silu, gate, self.stream);
-        // try mlx.multiply(&gate, gate, silu, self.stream);
-        try mlx.silu(&gate, gate, self.stream);
-        try mlx.multiply(&gate, gate, up, self.stream);
-        try self.down_proj.forward(result, gate);
     }
 
     pub fn deinit(self: *Self) void {
         self.gate_proj.deinit();
         self.down_proj.deinit();
         self.up_proj.deinit();
-        self.allocator.free(self.key);
+        for (self.allocs_to_free.items) |allocation| self.allocator.free(allocation);
+        self.allocs_to_free.deinit();
+    }
+
+    pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array) !void {
+        var gate = mlx.arrayNew();
+        var up = mlx.arrayNew();
+        defer {
+            mlx.arrayFree(gate);
+            mlx.arrayFree(up);
+        }
+        try self.gate_proj.forward(&gate, x);
+        try self.up_proj.forward(&up, x);
+        try mlx.silu(&gate, gate, self.stream);
+        try mlx.multiply(&gate, gate, up, self.stream);
+        try self.down_proj.forward(result, gate);
     }
 };
 
 pub const TransformerBlock = struct {
     const Self = @This();
-    key: []const u8,
     self_attn: Attention,
     mlp: MLP,
-    input_layernorm: mlx.RMSNorm,
-    post_attention_layernorm: mlx.RMSNorm,
+    input_layernorm: *mlx.RMSNorm,
+    post_attention_layernorm: *mlx.RMSNorm,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, layer_idx: usize, config: *const QwenConfig, stream: mlx.Stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, layer_idx: usize, config: *const QwenConfig, weights_hash: *std.StringHashMap(*mlx.Array), stream: mlx.Stream) !Self {
+        var allocs_to_free = std.ArrayList([]const u8).init(allocator);
         const key = try allocJoin(allocator, parent, layer_idx);
-        errdefer allocator.free(key);
-        const self_attn = try Attention.init(allocator, key, "self_attn", config, stream);
-        const mlp = try MLP.init(allocator, key, "mlp", config.quantization, stream);
-        const input_layernorm = try mlx.RMSNorm.init(allocator, key, "input_layernorm", config.rms_norm_eps, stream);
-        const post_attention_layernorm = try mlx.RMSNorm.init(allocator, key, "post_attention_layernorm", config.rms_norm_eps, stream);
-        return Self{
-            .key = key,
+        try allocs_to_free.append(key);
+        const self_attn = try Attention.init(allocator, key, "self_attn", config, weights_hash, stream);
+        const mlp = try MLP.init(allocator, key, "mlp", config.quantization, weights_hash, stream);
+        const input_layernorm = try mlx.RMSNorm.init(allocator, key, "input_layernorm", config.rms_norm_eps, weights_hash, stream);
+        const post_attention_layernorm = try mlx.RMSNorm.init(allocator, key, "post_attention_layernorm", config.rms_norm_eps, weights_hash, stream);
+        return .{
             .self_attn = self_attn,
             .mlp = mlp,
             .input_layernorm = input_layernorm,
             .post_attention_layernorm = post_attention_layernorm,
             .stream = stream,
             .allocator = allocator,
+            .allocs_to_free = allocs_to_free,
         };
     }
 
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.self_attn.load(weights_map);
-        try self.mlp.load(weights_map);
-        try self.input_layernorm.load(weights_map);
-        try self.post_attention_layernorm.load(weights_map);
+    pub fn deinit(self: *Self) void {
+        self.self_attn.deinit();
+        self.mlp.deinit();
+        self.input_layernorm.deinit();
+        self.post_attention_layernorm.deinit();
+        for (self.allocs_to_free.items) |allocation| self.allocator.free(allocation);
+        self.allocs_to_free.deinit();
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array, mask: ?mlx.Array, cache: ?*mlx.KVCache, offset: c_int) !void {
@@ -236,53 +222,49 @@ pub const TransformerBlock = struct {
         try self.mlp.forward(&mlp_output, mlp_input);
         try mlx.add(result, attn_output, mlp_output, self.stream);
     }
-
-    pub fn deinit(self: *Self) void {
-        self.self_attn.deinit();
-        self.mlp.deinit();
-        self.input_layernorm.deinit();
-        self.post_attention_layernorm.deinit();
-        self.allocator.free(self.key);
-    }
 };
 
 pub const OlympicModel = struct {
     const Self = @This();
-    key: []const u8,
-    embed_tokens: mlx.Embedding,
+    embed_tokens: *mlx.Embedding,
     layers: []TransformerBlock,
-    norm: mlx.RMSNorm,
+    norm: *mlx.RMSNorm,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, config: *const QwenConfig, stream: mlx.Stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, config: *const QwenConfig, weights_hash: *std.StringHashMap(*mlx.Array), stream: mlx.Stream) !Self {
+        var allocs_to_free = std.ArrayList([]const u8).init(allocator);
         const key = try allocator.dupe(u8, parent);
-        errdefer allocator.free(key);
-        const embed_tokens = try mlx.Embedding.init(allocator, key, "embed_tokens", config.quantization, stream);
+        try allocs_to_free.append(key);
+        const embed_tokens = try mlx.Embedding.init(allocator, key, "embed_tokens", config.quantization, weights_hash, stream);
         const layers = try allocator.alloc(TransformerBlock, @intCast(config.num_hidden_layers));
-        errdefer allocator.free(layers);
         const layers_key = try allocJoin(allocator, key, "layers");
-        defer allocator.free(layers_key);
+        try allocs_to_free.append(layers_key);
         for (0..@intCast(config.num_hidden_layers)) |i| {
-            layers[i] = try TransformerBlock.init(allocator, layers_key, i, config, stream);
+            layers[i] = try TransformerBlock.init(allocator, layers_key, i, config, weights_hash, stream);
         }
-        const norm = try mlx.RMSNorm.init(allocator, key, "norm", config.rms_norm_eps, stream);
-        return Self{
-            .key = key,
+        const norm = try mlx.RMSNorm.init(allocator, key, "norm", config.rms_norm_eps, weights_hash, stream);
+        return .{
             .embed_tokens = embed_tokens,
             .layers = layers,
             .norm = norm,
             .stream = stream,
             .allocator = allocator,
+            .allocs_to_free = allocs_to_free,
         };
     }
 
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.embed_tokens.load(weights_map);
+    pub fn deinit(self: *Self) void {
+        self.embed_tokens.deinit();
         for (self.layers) |*layer| {
-            try layer.load(weights_map);
+            layer.deinit();
         }
-        try self.norm.load(weights_map);
+        self.allocator.free(self.layers);
+        self.norm.deinit();
+
+        for (self.allocs_to_free.items) |allocation| self.allocator.free(allocation);
+        self.allocs_to_free.deinit();
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, inputs: mlx.Array, mask: ?mlx.Array, cache: ?*mlx.Cache) !void {
@@ -303,47 +285,29 @@ pub const OlympicModel = struct {
         }
         try self.norm.forward(result, h);
     }
-
-    pub fn deinit(self: *Self) void {
-        self.embed_tokens.deinit();
-        for (self.layers) |*layer| {
-            layer.deinit();
-        }
-        self.allocator.free(self.layers);
-        self.norm.deinit();
-        self.allocator.free(self.key);
-    }
 };
 
 pub const Model = struct {
     const Self = @This();
     model: OlympicModel,
     tie_word_embeddings: bool,
-    lm_head: ?mlx.Linear,
+    lm_head: ?*mlx.Linear,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, config: *const QwenConfig, stream: mlx.Stream) !Self {
-        const model = try OlympicModel.init(allocator, "model", config, stream);
+    pub fn init(allocator: std.mem.Allocator, config: *const QwenConfig, weights_hash: *std.StringHashMap(*mlx.Array), stream: mlx.Stream) !Self {
+        const model = try OlympicModel.init(allocator, "model", config, weights_hash, stream);
         const lm_head = if (!config.tie_word_embeddings)
-            try mlx.Linear.init(allocator, "lm_head", "", false, config.quantization, stream)
+            try mlx.Linear.init(allocator, "lm_head", "", false, config.quantization, weights_hash, stream)
         else
             null;
-
-        return Self{
+        return .{
             .model = model,
             .tie_word_embeddings = config.tie_word_embeddings,
             .lm_head = lm_head,
             .stream = stream,
             .allocator = allocator,
         };
-    }
-
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.model.load(weights_map);
-        if (!self.tie_word_embeddings and self.lm_head != null) {
-            try self.lm_head.?.load(weights_map);
-        }
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, inputs: mlx.Array, mask: ?mlx.Array, cache: ?*mlx.Cache) !void {
@@ -380,20 +344,17 @@ pub const Transformer = struct {
         const path_config = try std.fmt.bufPrintZ(&buf, "{s}/config.json", .{model_path});
         const config = try loadJson(QwenConfig, allocator, path_config, true);
         defer config.deinit();
-
         const eos_token_id = try allocator.dupe(u32, &[_]u32{config.value.eos_token_id});
         errdefer allocator.free(eos_token_id);
-
-        var model = try Model.init(allocator, &config.value, stream);
-        errdefer model.deinit();
-
         const path_weight = try std.fmt.bufPrintZ(&buf, "{s}/model.safetensors", .{model_path});
         var safetensors = try mlx.Safetensors.load(path_weight, stream);
         defer safetensors.deinit();
-
-        try model.load(&safetensors.weights);
-
-        return Self{
+        var weights_hash = std.StringHashMap(*mlx.Array).init(allocator);
+        defer weights_hash.deinit();
+        var model = try Model.init(allocator, &config.value, &weights_hash, stream);
+        errdefer model.deinit();
+        try safetensors.unload(&weights_hash);
+        return .{
             .allocator = allocator,
             .stream = stream,
             .model = model,

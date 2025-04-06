@@ -76,6 +76,7 @@ zig build run-llm
 
 Or run the executable directly with various options:
 ```fish
+zig build
 zig-out/bin/llm [options] [input]
 ```
 
@@ -92,16 +93,16 @@ zig-out/bin/llm [options] [input]
 
 ```fish
 # Use Llama (default)
-zig-out/bin/llm "Hi mom!"
+zig-out/bin/llm
 
-# Use Phi model with custom prompt
-zig-out/bin/llm --model-type=phi "How should I explain the Internet?"
+# Use Qwen Coder
+zig-out/bin/llm --model-type=qwen
 
 # Use Olympic Coder model for programming tasks
 zig-out/bin/llm --model-type=olympic "Write a python program to calculate the 10th Fibonacci number"
 
-# Use Qwen Coder for code completion
-zig-out/bin/llm --model-type=qwen "#write a quick sort algorithm"
+# Use Phi model with custom prompt
+zig-out/bin/llm --model-type=phi --system-prompt="You are a helpful assistant" "How should I explain the Internet?"
 ```
 
 ## Phi-4 Text Generation

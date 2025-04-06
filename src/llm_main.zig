@@ -1,4 +1,4 @@
-//! llm_main.zig - Unified entry point for LLM models
+//! llm_main.zig - Entry point for LLM models
 //!
 //! Copyright 2025 Joe
 
@@ -24,25 +24,34 @@ const ModelType = enum {
     }
 };
 
+const TransformerUnion = union(ModelType) {
+    llama: LlamaTransformer,
+    phi: PhiTransformer,
+    qwen_coder: QwenTransformer,
+    olympic_coder: QwenTransformer,
+};
+
 pub const ModelConfig = struct {
     const Self = @This();
     model_type: ModelType,
     model_name: []const u8,
     num_tokens: usize = 30,
-    chat_format: ?[]const u8,
-    system_prompt: []const u8,
-    user_input: []const u8,
+    chat_format: ?[]const u8 = null,
+    chat_content: []const []const u8,
     required_files: ?[]const []const u8 = null,
     allocator: std.mem.Allocator,
+    transformer: TransformerUnion,
 
     pub fn init(allocator: std.mem.Allocator, model_type: ModelType) !Self {
+        var content = std.ArrayList([]const u8).init(allocator);
+        errdefer content.deinit();
+
         var config = Self{
             .model_type = model_type,
             .model_name = undefined,
-            .chat_format = null,
-            .system_prompt = "",
-            .user_input = "",
+            .chat_content = undefined,
             .allocator = allocator,
+            .transformer = undefined,
         };
 
         switch (model_type) {
@@ -53,15 +62,15 @@ pub const ModelConfig = struct {
                     \\
                     \\Cutting Knowledge Date: December 2023
                     \\Today Date: 26 Jul 2024
-                    \\
                     \\{s}<|eot_id|><|start_header_id|>user<|end_header_id|>
                     \\
                     \\{s}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
                     \\
                     \\
                 ;
-                config.system_prompt = "You are a helpful assistant.";
-                config.user_input = "How to get length of ArrayList in Zig?";
+
+                try content.append("You are a helpful assistant.");
+                try content.append("How to get length of ArrayList in Zig?");
             },
             .phi => {
                 config.model_name = "phi-4-2bit";
@@ -73,8 +82,10 @@ pub const ModelConfig = struct {
                     \\<|im_start|>assistant<|im_sep|>
                     \\
                 ;
-                config.system_prompt = "You are a medieval knight and must provide explanations to modern people.";
-                config.user_input = "How should I explain the Internet?";
+
+                try content.append("You are a medieval knight and must provide explanations to modern people.");
+                try content.append("How should I explain the Internet?");
+
                 const files = &[_][]const u8{
                     "config.json",                      "tokenizer.json",
                     "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors",
@@ -84,8 +95,8 @@ pub const ModelConfig = struct {
             .qwen_coder => {
                 config.model_name = "Qwen2.5-Coder-1.5B-4bit";
                 config.chat_format = null;
-                config.system_prompt = "";
-                config.user_input =
+
+                try content.append(
                     \\<|fim_prefix|>def quicksort(arr):
                     \\    if len(arr) <= 1:
                     \\        return arr
@@ -94,7 +105,7 @@ pub const ModelConfig = struct {
                     \\    middle = [x for x in arr if x == pivot]
                     \\    right = [x for x in arr if x > pivot]
                     \\    return quicksort(left) + middle + quicksort(right)<|fim_middle|>
-                ;
+                );
             },
             .olympic_coder => {
                 config.model_name = "OlympicCoder-7B-4bit";
@@ -104,11 +115,16 @@ pub const ModelConfig = struct {
                     \\<|im_start|>assistant
                     \\
                 ;
-                config.system_prompt = "";
-                config.user_input = "Write a python program to calculate the 10th fibonacci number";
+                try content.append("Write a python program to calculate the 10th fibonacci number");
             },
         }
-
+        config.transformer = switch (model_type) {
+            .llama => .{ .llama = try LlamaTransformer.init(allocator, config.model_name) },
+            .phi => .{ .phi = try PhiTransformer.init(allocator, config.model_name) },
+            .qwen_coder => .{ .qwen_coder = try QwenTransformer.init(allocator, config.model_name) },
+            .olympic_coder => .{ .olympic_coder = try QwenTransformer.init(allocator, config.model_name) },
+        };
+        config.chat_content = try content.toOwnedSlice();
         return config;
     }
 
@@ -116,25 +132,26 @@ pub const ModelConfig = struct {
         if (self.required_files) |files| {
             self.allocator.free(files);
         }
+        self.allocator.free(self.chat_content);
+        switch (self.transformer) {
+            .llama => |*t| t.deinit(),
+            .phi => |*t| t.deinit(),
+            .qwen_coder => |*t| t.deinit(),
+            .olympic_coder => |*t| t.deinit(),
+        }
+    }
+
+    pub fn setContent(self: *Self, content: []const []const u8) !void {
+        self.allocator.free(self.chat_content);
+        self.chat_content = try self.allocator.dupe([]const u8, content);
     }
 
     pub fn generate(self: *Self, token_ids: []const u32) ![]const u32 {
-        return switch (self.model_type) {
-            .llama => blk: {
-                var transformer = try LlamaTransformer.init(self.allocator, self.model_name);
-                defer transformer.deinit();
-                break :blk try transformer.generate(token_ids, self.num_tokens);
-            },
-            .phi => blk: {
-                var transformer = try PhiTransformer.init(self.allocator, self.model_name);
-                defer transformer.deinit();
-                break :blk try transformer.generate(token_ids, self.num_tokens);
-            },
-            .qwen_coder, .olympic_coder => blk: {
-                var transformer = try QwenTransformer.init(self.allocator, self.model_name);
-                defer transformer.deinit();
-                break :blk try transformer.generate(token_ids, self.num_tokens);
-            },
+        return switch (self.transformer) {
+            .llama => |*t| t.generate(token_ids, self.num_tokens),
+            .phi => |*t| t.generate(token_ids, self.num_tokens),
+            .qwen_coder => |*t| t.generate(token_ids, self.num_tokens),
+            .olympic_coder => |*t| t.generate(token_ids, self.num_tokens),
         };
     }
 };
@@ -143,13 +160,11 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
-
     var model_type: ModelType = .llama;
-    var user_input: ?[]const u8 = null;
-    var system_prompt: ?[]const u8 = null;
     var num_tokens: usize = 30;
     var model_name: ?[]const u8 = null;
-
+    var content_list = std.ArrayList([]const u8).init(allocator);
+    defer content_list.deinit();
     const process_args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, process_args);
 
@@ -160,12 +175,13 @@ pub fn main() !void {
             if (std.mem.indexOf(u8, arg, "=")) |equals_pos| {
                 const key = arg[2..equals_pos];
                 const value = arg[equals_pos + 1 ..];
+
                 if (std.mem.eql(u8, key, "model-type")) {
                     model_type = try ModelType.fromString(value);
                 } else if (std.mem.eql(u8, key, "model-name")) {
                     model_name = value;
                 } else if (std.mem.eql(u8, key, "system-prompt")) {
-                    system_prompt = value;
+                    try content_list.append(value);
                 } else if (std.mem.eql(u8, key, "num-tokens")) {
                     num_tokens = try std.fmt.parseInt(usize, value, 10);
                 }
@@ -174,63 +190,46 @@ pub fn main() !void {
                 std.process.exit(0);
             }
         } else {
-            user_input = arg;
+            try content_list.append(arg);
         }
     }
 
     var config = try ModelConfig.init(allocator, model_type);
     defer config.deinit();
-
-    if (user_input) |input| {
-        config.user_input = input;
-    }
-    if (system_prompt) |prompt| {
-        config.system_prompt = prompt;
-    }
     if (model_name) |name| {
         config.model_name = name;
     }
     config.num_tokens = num_tokens;
-
+    if (content_list.items.len > 0) {
+        try config.setContent(content_list.items);
+    }
     try runModel(&config);
 }
 
 fn runModel(config: *ModelConfig) !void {
+    std.debug.print("Downloading model: {s}\n", .{config.model_name});
     try download(config.allocator, "mlx-community", config.model_name, config.required_files);
+
+    std.debug.print("Initializing tokenizer\n", .{});
     var tokenizer = try Tokenizer.init(config.allocator, config.model_name);
     defer tokenizer.deinit();
 
-    var format_args: []const []const u8 = undefined;
-    if (config.chat_format) |format| {
-        var placeholders: usize = 0;
-        var i: usize = 0;
-        while (i + 2 < format.len) : (i += 1) {
-            if (format[i] == '{' and format[i + 1] == 's' and format[i + 2] == '}') {
-                placeholders += 1;
-                i += 2;
-            }
-        }
-
-        if (placeholders == 1) {
-            format_args = &[_][]const u8{config.user_input};
-        } else if (placeholders == 2) {
-            format_args = &[_][]const u8{ config.system_prompt, config.user_input };
-        } else {
-            return error.UnsupportedFormatString;
-        }
-    } else {
-        format_args = &[_][]const u8{config.user_input};
-    }
-
-    const input_ids = try tokenizer.encodeChat(config.chat_format, format_args);
+    std.debug.print("Encoding input\n", .{});
+    const input_ids = try tokenizer.encodeChat(config.chat_format, config.chat_content);
     defer config.allocator.free(input_ids);
 
+    std.debug.print("Starting model generation\n", .{});
     const output_ids = try config.generate(input_ids);
     defer config.allocator.free(output_ids);
 
+    std.debug.print("Decoding output\n", .{});
     const output_str = try tokenizer.decode(output_ids);
     defer config.allocator.free(output_str);
-    std.debug.print("\nInput: {s}\n\nOutput: {s}\n", .{ config.user_input, output_str });
+
+    std.debug.print("\nInput: {s}\n\nOutput: {s}\n", .{
+        if (config.chat_content.len > 0) config.chat_content[config.chat_content.len - 1] else "",
+        output_str,
+    });
 }
 
 fn printUsage() void {
@@ -245,23 +244,45 @@ fn printUsage() void {
         \\  --help                  Show this help
         \\
         \\Examples:
-        \\  llm "Hi mom!"
-        \\  llm --model-type=phi "How should I explain the Internet?"
+        \\  llm --model-type=phi --system-prompt="You are a helpful assistant" "How should I explain the Internet?"
         \\  llm --model-type=olympic "Write a python function to check if a number is prime"
         \\
     ;
     std.debug.print("{s}", .{usage});
 }
 
-test "All LLM models" {
-    std.debug.print("\n=== LLM_MAIN.ZIG ===\n\n", .{});
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    inline for (.{ .llama, .phi, .qwen_coder, .olympic_coder }) |model_type| {
-        var config = try ModelConfig.init(allocator, model_type);
-        defer config.deinit();
-        config.num_tokens = 5;
-        try runModel(&config);
-    }
-    _ = gpa.deinit();
+test "Llama model" {
+    std.debug.print("\n=== TESTING LLAMA MODEL ===\n\n", .{});
+    const allocator = std.testing.allocator;
+    var config = try ModelConfig.init(allocator, .llama);
+    defer config.deinit();
+    config.num_tokens = 5;
+    try runModel(&config);
+}
+
+test "Phi model" {
+    std.debug.print("\n=== TESTING PHI MODEL ===\n\n", .{});
+    const allocator = std.testing.allocator;
+    var config = try ModelConfig.init(allocator, .phi);
+    defer config.deinit();
+    config.num_tokens = 5;
+    try runModel(&config);
+}
+
+test "Qwen model" {
+    std.debug.print("\n=== TESTING QWEN MODEL ===\n\n", .{});
+    const allocator = std.testing.allocator;
+    var config = try ModelConfig.init(allocator, .qwen_coder);
+    defer config.deinit();
+    config.num_tokens = 5;
+    try runModel(&config);
+}
+
+test "Olympic model" {
+    std.debug.print("\n=== TESTING OLYMPIC MODEL ===\n\n", .{});
+    const allocator = std.testing.allocator;
+    var config = try ModelConfig.init(allocator, .olympic_coder);
+    defer config.deinit();
+    config.num_tokens = 5;
+    try runModel(&config);
 }

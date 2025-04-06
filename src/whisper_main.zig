@@ -27,9 +27,7 @@ pub fn main() !void {
 
 test "Whisper transcription" {
     std.debug.print("\n=== WHISPER_MAIN.ZIG ===\n\n", .{});
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    defer _ = gpa.deinit();
+    const allocator = std.testing.allocator;
     const model_name = "whisper-large-v3-turbo";
     const audio_file = "alive.mp3";
     try download(allocator, "openai", model_name, null);

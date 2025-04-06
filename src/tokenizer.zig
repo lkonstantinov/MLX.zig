@@ -319,7 +319,6 @@ pub const Tokenizer = struct {
     }
 
     pub fn encode(self: *Self, text: []const u8) ![]const u32 {
-        // std.debug.print("\nEncoded: {s}\n", .{text});
         var result = std.ArrayList(u32).init(self.allocator);
         errdefer result.deinit();
         var parts = try self.splitWithSpecials(text);
@@ -379,9 +378,7 @@ pub const Tokenizer = struct {
 
 test "Tokenizer round-trip" {
     std.debug.print("\n=== TOKENIZER.ZIG ===\n\n", .{});
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    const allocator = std.testing.allocator;
     const pattern = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
     const specials = [_][]const u8{
         "<|begin_of_text|>",

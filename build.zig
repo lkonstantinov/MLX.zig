@@ -130,8 +130,7 @@ pub fn build(b: *std.Build) !void {
         \\  --help                  Show this help
         \\
         \\Examples:
-        \\  llm "Hi mom!"
-        \\  llm --model-type=phi "How should I explain the Internet?"
+        \\  llm --model-type=phi --system-prompt="You are a helpful assistant" "How should I explain the Internet?"
         \\  llm --model-type=olympic "Write a python function to check if a number is prime"
         \\
     });

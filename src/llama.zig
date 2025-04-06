@@ -9,36 +9,33 @@ const allocJoin = @import("utils.zig").allocJoin;
 
 pub const MLP = struct {
     const Self = @This();
-    key: []const u8,
-    gate_weight: mlx.Weight,
-    up_weight: mlx.Weight,
-    down_weight: mlx.Weight,
+    gate_weight: *mlx.Linear,
+    up_weight: *mlx.Linear,
+    down_weight: *mlx.Linear,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, quant_config: ?mlx.QuantConfig, stream: mlx.Stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, quant_config: ?mlx.QuantConfig, weights_hash: *std.StringHashMap(*mlx.Array), stream: mlx.Stream) !Self {
         const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
-        return Self{
-            .gate_weight = try mlx.Weight.init(quant_config, stream),
-            .up_weight = try mlx.Weight.init(quant_config, stream),
-            .down_weight = try mlx.Weight.init(quant_config, stream),
+        var allocs_to_free = std.ArrayList([]const u8).init(allocator);
+        try allocs_to_free.append(key);
+        return .{
+            .gate_weight = try mlx.Linear.init(allocator, key, "gate_proj", false, quant_config, weights_hash, stream),
+            .up_weight = try mlx.Linear.init(allocator, key, "up_proj", false, quant_config, weights_hash, stream),
+            .down_weight = try mlx.Linear.init(allocator, key, "down_proj", false, quant_config, weights_hash, stream),
             .stream = stream,
-            .key = key,
             .allocator = allocator,
+            .allocs_to_free = allocs_to_free,
         };
     }
 
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        const gate_key = try allocJoin(self.allocator, self.key, "gate_proj");
-        defer self.allocator.free(gate_key);
-        const up_key = try allocJoin(self.allocator, self.key, "up_proj");
-        defer self.allocator.free(up_key);
-        const down_key = try allocJoin(self.allocator, self.key, "down_proj");
-        defer self.allocator.free(down_key);
-        try self.gate_weight.load(gate_key, weights_map);
-        try self.up_weight.load(up_key, weights_map);
-        try self.down_weight.load(down_key, weights_map);
+    pub fn deinit(self: *Self) void {
+        self.gate_weight.deinit();
+        self.up_weight.deinit();
+        self.down_weight.deinit();
+        for (self.allocs_to_free.items) |key| self.allocator.free(key);
+        self.allocs_to_free.deinit();
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array) !void {
@@ -57,42 +54,37 @@ pub const MLP = struct {
         try mlx.multiply(&up, gate, up, self.stream);
         try self.down_weight.forward(result, up);
     }
-
-    pub fn deinit(self: *Self) void {
-        self.gate_weight.deinit();
-        self.up_weight.deinit();
-        self.down_weight.deinit();
-        self.allocator.free(self.key);
-    }
 };
 
 pub const Attention = struct {
     const Self = @This();
-    key: []const u8,
     n_heads: c_int,
     n_kv_heads: c_int,
     head_dim: c_int,
     n_repeat: c_int,
     scale: mlx.Array,
-    q_weight: mlx.Weight,
-    k_weight: mlx.Weight,
-    v_weight: mlx.Weight,
-    o_weight: mlx.Weight,
+    q_weight: *mlx.Linear,
+    k_weight: *mlx.Linear,
+    v_weight: *mlx.Linear,
+    o_weight: *mlx.Linear,
     rope: Llama3RoPE,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, n_heads: c_int, n_kv_heads: c_int, head_dim: c_int, rope_theta: f32, rope_scaling_config: LlamaConfig.RopeScalingConfig, quant_config: ?mlx.QuantConfig, stream: mlx.Stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, n_heads: c_int, n_kv_heads: c_int, head_dim: c_int, rope_theta: f32, rope_scaling_config: LlamaConfig.RopeScalingConfig, quant_config: ?mlx.QuantConfig, weights_hash: *std.StringHashMap(*mlx.Array), stream: mlx.Stream) !Self {
         const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
         const scale = mlx.arrayNewFloat(1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))));
         const n_repeat = @divExact(n_heads, n_kv_heads);
         const rope = try Llama3RoPE.init(head_dim, rope_theta, rope_scaling_config, stream);
-        return Self{
-            .q_weight = try mlx.Weight.init(quant_config, stream),
-            .k_weight = try mlx.Weight.init(quant_config, stream),
-            .v_weight = try mlx.Weight.init(quant_config, stream),
-            .o_weight = try mlx.Weight.init(quant_config, stream),
+        var allocs_to_free = std.ArrayList([]const u8).init(allocator);
+        try allocs_to_free.append(key);
+
+        return .{
+            .q_weight = try mlx.Linear.init(allocator, key, "q_proj", false, quant_config, weights_hash, stream),
+            .k_weight = try mlx.Linear.init(allocator, key, "k_proj", false, quant_config, weights_hash, stream),
+            .v_weight = try mlx.Linear.init(allocator, key, "v_proj", false, quant_config, weights_hash, stream),
+            .o_weight = try mlx.Linear.init(allocator, key, "o_proj", false, quant_config, weights_hash, stream),
             .n_heads = n_heads,
             .n_kv_heads = n_kv_heads,
             .head_dim = head_dim,
@@ -100,24 +92,20 @@ pub const Attention = struct {
             .scale = scale,
             .rope = rope,
             .stream = stream,
-            .key = key,
             .allocator = allocator,
+            .allocs_to_free = allocs_to_free,
         };
     }
 
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        const q_key = try allocJoin(self.allocator, self.key, "q_proj");
-        defer self.allocator.free(q_key);
-        const k_key = try allocJoin(self.allocator, self.key, "k_proj");
-        defer self.allocator.free(k_key);
-        const v_key = try allocJoin(self.allocator, self.key, "v_proj");
-        defer self.allocator.free(v_key);
-        const o_key = try allocJoin(self.allocator, self.key, "o_proj");
-        defer self.allocator.free(o_key);
-        try self.q_weight.load(q_key, weights_map);
-        try self.k_weight.load(k_key, weights_map);
-        try self.v_weight.load(v_key, weights_map);
-        try self.o_weight.load(o_key, weights_map);
+    pub fn deinit(self: *Self) void {
+        self.q_weight.deinit();
+        self.k_weight.deinit();
+        self.v_weight.deinit();
+        self.o_weight.deinit();
+        self.rope.deinit();
+        mlx.arrayFree(self.scale);
+        for (self.allocs_to_free.items) |key| self.allocator.free(key);
+        self.allocs_to_free.deinit();
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array, mask: ?mlx.Array, cache: ?*mlx.KVCache, offset: c_int) !void {
@@ -149,16 +137,6 @@ pub const Attention = struct {
         try mlx.einsum(&w, .{ w, v }, "b h l k, b h k d -> b h l d", self.stream);
         try mlx.rEshap(&w, w, "b h l d -> b l (h d)", .{}, self.stream);
         try self.o_weight.forward(result, w);
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.q_weight.deinit();
-        self.k_weight.deinit();
-        self.v_weight.deinit();
-        self.o_weight.deinit();
-        self.rope.deinit();
-        self.allocator.free(self.key);
-        mlx.arrayFree(self.scale);
     }
 };
 
@@ -203,7 +181,7 @@ pub const Llama3RoPE = struct {
         try mlx.add(&mid_freq, mid_freq, smooth_factors, stream);
         try mlx.divide(&mid_freq, freqs, mid_freq, stream);
         try mlx.where(&high_freq, high_freq_mask, high_freq, freqs, stream);
-        return Self{
+        return .{
             .freqs = freqs,
             .rope_base = mlx.OptionalFloat{ .has_value = false, .value = 0.0 },
             .dims = dims,
@@ -223,37 +201,40 @@ pub const Llama3RoPE = struct {
 
 pub const TransformerBlock = struct {
     const Self = @This();
-    key: []const u8,
     attention: Attention,
     mlp: MLP,
-    input_layernorm: mlx.RMSNorm,
-    post_attention_layernorm: mlx.RMSNorm,
+    input_layernorm: *mlx.RMSNorm,
+    post_attention_layernorm: *mlx.RMSNorm,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, layer_idx: usize, config: *const LlamaConfig, stream: mlx.Stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, layer_idx: usize, config: *const LlamaConfig, weights_hash: *std.StringHashMap(*mlx.Array), stream: mlx.Stream) !Self {
         const key = try allocJoin(allocator, parent, layer_idx);
-        errdefer allocator.free(key);
-        const attention = try Attention.init(allocator, key, "self_attn", config.num_attention_heads, config.num_key_value_heads, config.head_dim, config.rope_theta, config.rope_scaling, config.quantization, stream);
-        const mlp = try MLP.init(allocator, key, "mlp", config.quantization, stream);
-        const input_layernorm = try mlx.RMSNorm.init(allocator, key, "input_layernorm", config.rms_norm_eps, stream);
-        const post_attention_layernorm = try mlx.RMSNorm.init(allocator, key, "post_attention_layernorm", config.rms_norm_eps, stream);
-        return Self{
+        const attention = try Attention.init(allocator, key, "self_attn", config.num_attention_heads, config.num_key_value_heads, config.head_dim, config.rope_theta, config.rope_scaling, config.quantization, weights_hash, stream);
+        const mlp = try MLP.init(allocator, key, "mlp", config.quantization, weights_hash, stream);
+        const input_layernorm = try mlx.RMSNorm.init(allocator, key, "input_layernorm", config.rms_norm_eps, weights_hash, stream);
+        const post_attention_layernorm = try mlx.RMSNorm.init(allocator, key, "post_attention_layernorm", config.rms_norm_eps, weights_hash, stream);
+        var allocs_to_free = std.ArrayList([]const u8).init(allocator);
+        try allocs_to_free.append(key);
+        return .{
             .attention = attention,
             .mlp = mlp,
             .input_layernorm = input_layernorm,
             .post_attention_layernorm = post_attention_layernorm,
             .stream = stream,
             .allocator = allocator,
-            .key = key,
+            .allocs_to_free = allocs_to_free,
         };
     }
 
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.attention.load(weights_map);
-        try self.mlp.load(weights_map);
-        try self.input_layernorm.load(weights_map);
-        try self.post_attention_layernorm.load(weights_map);
+    pub fn deinit(self: *Self) void {
+        self.attention.deinit();
+        self.mlp.deinit();
+        self.input_layernorm.deinit();
+        self.post_attention_layernorm.deinit();
+        for (self.allocs_to_free.items) |key| self.allocator.free(key);
+        self.allocs_to_free.deinit();
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array, mask: ?mlx.Array, cache: ?*mlx.KVCache, offset: c_int) !void {
@@ -270,51 +251,48 @@ pub const TransformerBlock = struct {
         try self.mlp.forward(&mlp, mlp);
         try mlx.add(result, mlp, attn, self.stream);
     }
-
-    pub fn deinit(self: *Self) void {
-        self.attention.deinit();
-        self.mlp.deinit();
-        self.input_layernorm.deinit();
-        self.post_attention_layernorm.deinit();
-        self.allocator.free(self.key);
-    }
 };
 
 pub const LlamaModel = struct {
     const Self = @This();
-    key: []const u8,
-    embed_tokens: mlx.Embedding,
+    embed_tokens: *mlx.Embedding,
     layers: []TransformerBlock,
-    norm: mlx.RMSNorm,
+    norm: *mlx.RMSNorm,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, config: *const LlamaConfig, stream: mlx.Stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, config: *const LlamaConfig, weights_hash: *std.StringHashMap(*mlx.Array), stream: mlx.Stream) !Self {
         const key = try allocator.dupe(u8, parent);
-        const embed_tokens = try mlx.Embedding.init(allocator, key, "embed_tokens", config.quantization, stream);
-        const norm = try mlx.RMSNorm.init(allocator, key, "norm", config.rms_norm_eps, stream);
+        const embed_tokens = try mlx.Embedding.init(allocator, key, "embed_tokens", config.quantization, weights_hash, stream);
+        const norm = try mlx.RMSNorm.init(allocator, key, "norm", config.rms_norm_eps, weights_hash, stream);
         const layers = try allocator.alloc(TransformerBlock, @intCast(config.num_hidden_layers));
         const layers_key = try allocJoin(allocator, key, "layers");
-        defer allocator.free(layers_key);
+        var allocs_to_free = std.ArrayList([]const u8).init(allocator);
+        try allocs_to_free.append(key);
+        try allocs_to_free.append(layers_key);
         for (0..@intCast(config.num_hidden_layers)) |i| {
-            layers[i] = try TransformerBlock.init(allocator, layers_key, i, config, stream);
+            layers[i] = try TransformerBlock.init(allocator, layers_key, i, config, weights_hash, stream);
         }
-        return Self{
+        return .{
             .embed_tokens = embed_tokens,
             .layers = layers,
             .norm = norm,
             .stream = stream,
             .allocator = allocator,
-            .key = key,
+            .allocs_to_free = allocs_to_free,
         };
     }
 
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.embed_tokens.load(weights_map);
+    pub fn deinit(self: *Self) void {
+        self.embed_tokens.deinit();
         for (self.layers) |*layer| {
-            try layer.load(weights_map);
+            layer.deinit();
         }
-        try self.norm.load(weights_map);
+        self.allocator.free(self.layers);
+        self.norm.deinit();
+        for (self.allocs_to_free.items) |key| self.allocator.free(key);
+        self.allocs_to_free.deinit();
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, toks: mlx.Array, mask: ?mlx.Array, cache: ?*mlx.Cache) !void {
@@ -330,30 +308,20 @@ pub const LlamaModel = struct {
         try self.norm.forward(result, x);
         if (cache) |c| c.offset += seq_len;
     }
-
-    pub fn deinit(self: *Self) void {
-        self.embed_tokens.deinit();
-        for (self.layers) |*layer| {
-            layer.deinit();
-        }
-        self.allocator.free(self.layers);
-        self.norm.deinit();
-        self.allocator.free(self.key);
-    }
 };
 
 pub const Llama = struct {
     const Self = @This();
     model: LlamaModel,
     tie_word_embeddings: bool,
-    lm_head: ?mlx.Linear,
+    lm_head: ?*mlx.Linear,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, config: *const LlamaConfig, stream: mlx.Stream) !Self {
-        const model = try LlamaModel.init(allocator, "model", config, stream);
-        const lm_head = if (!config.tie_word_embeddings) try mlx.Linear.init(allocator, "lm_head", "", false, config.quantization, stream) else null;
-        return Self{
+    pub fn init(allocator: std.mem.Allocator, config: *const LlamaConfig, weights_hash: *std.StringHashMap(*mlx.Array), stream: mlx.Stream) !Self {
+        const model = try LlamaModel.init(allocator, "model", config, weights_hash, stream);
+        const lm_head = if (!config.tie_word_embeddings) try mlx.Linear.init(allocator, "lm_head", "", false, config.quantization, weights_hash, stream) else null;
+        return .{
             .model = model,
             .tie_word_embeddings = config.tie_word_embeddings,
             .lm_head = lm_head,
@@ -362,9 +330,9 @@ pub const Llama = struct {
         };
     }
 
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.model.load(weights_map);
-        if (!self.tie_word_embeddings) try self.lm_head.?.load(weights_map);
+    pub fn deinit(self: *Self) void {
+        self.model.deinit();
+        if (!self.tie_word_embeddings) self.lm_head.?.deinit();
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, toks: mlx.Array, mask: ?mlx.Array, cache: ?*mlx.Cache) !void {
@@ -376,11 +344,6 @@ pub const Llama = struct {
         } else {
             try self.lm_head.?.forward(result, x);
         }
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.model.deinit();
-        if (!self.tie_word_embeddings) self.lm_head.?.deinit();
     }
 };
 
@@ -398,13 +361,15 @@ pub const Transformer = struct {
         const config = try loadJson(LlamaConfig, allocator, path_config, true);
         defer config.deinit();
         const eos_token_id = try allocator.dupe(u32, config.value.eos_token_id);
-        var model = try Llama.init(allocator, &config.value, stream);
-        errdefer model.deinit();
         const path_weight = try std.fmt.bufPrintZ(&buf, "{s}/model.safetensors", .{model_path});
         var safetensors = try mlx.Safetensors.load(path_weight, stream);
         defer safetensors.deinit();
-        try model.load(&safetensors.weights);
-        return Self{
+        var weights_hash = std.StringHashMap(*mlx.Array).init(allocator);
+        defer weights_hash.deinit();
+        var model = try Llama.init(allocator, &config.value, &weights_hash, stream);
+        errdefer model.deinit();
+        try safetensors.unload(&weights_hash);
+        return .{
             .allocator = allocator,
             .stream = stream,
             .model = model,
@@ -495,9 +460,8 @@ const LlamaConfig = struct {
 };
 
 test "Transformer generating" {
-    std.debug.print("\n=== TRANSFORMER.ZIG ===\n\n", .{});
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
+    std.debug.print("\n=== LLAMA.ZIG ===\n\n", .{});
+    const allocator = std.testing.allocator;
     const initial_tokens = [_]u32{ 9906, 1917 };
     const num_tokens_to_generate = 10;
     var transformer = try Transformer.init(allocator, "Llama-3.2-1B-Instruct-4bit");

@@ -534,271 +534,8 @@ pub fn fastScaledDotProductAttention(result: *C.mlx_array, queries: C.mlx_array,
 }
 
 /// ============================================================================
-/// Custom Operations
-/// ============================================================================
-pub const Linear = struct {
-    const Self = @This();
-    key: []const u8,
-    weight: Weight,
-    has_bias: bool,
-    bias: ?Array,
-    stream: Stream,
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, has_bias: bool, quant_config: ?QuantConfig, stream: Stream) !Self {
-        const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
-        const bias = if (has_bias) arrayNew() else null;
-        return Self{
-            .weight = try Weight.init(quant_config, stream),
-            .has_bias = has_bias,
-            .bias = bias,
-            .stream = stream,
-            .key = key,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn load(self: *Self, weights_map: *const MapStrArr) !void {
-        try self.weight.load(self.key, weights_map);
-        if (self.has_bias) {
-            try loadArray(&self.bias.?, self.key, "bias", weights_map);
-        }
-    }
-
-    pub fn forward(self: *Self, result: *Array, x: Array) !void {
-        try self.weight.forward(result, x);
-        if (self.has_bias) {
-            try add(result, result.*, self.bias.?, self.stream);
-        }
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.weight.deinit();
-        if (self.has_bias) {
-            _ = arrayFree(self.bias.?);
-        }
-        self.allocator.free(self.key);
-    }
-};
-
-pub const Embedding = struct {
-    const Self = @This();
-    key: []const u8,
-    weight: Weight,
-    stream: Stream,
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, quant_config: ?QuantConfig, stream: Stream) !Self {
-        const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
-        return Self{
-            .weight = try Weight.init(quant_config, stream),
-            .stream = stream,
-            .key = key,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn load(self: *Self, weights_map: *const MapStrArr) !void {
-        try self.weight.loadDequantized(self.key, weights_map);
-    }
-
-    pub fn forward(self: *Self, result: *Array, toks: Array) !void {
-        try take(result, self.weight.weight, toks, 0, self.stream);
-    }
-
-    pub fn asLinear(self: *Self, result: *Array, x: Array) !void {
-        try self.weight.forward(result, x);
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.weight.deinit();
-        self.allocator.free(self.key);
-    }
-};
-
-pub const LayerNorm = struct {
-    const Self = @This();
-    key: []const u8,
-    dims: c_int,
-    eps: f32,
-    weight: Array,
-    bias: Array,
-    stream: Stream,
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, dims: c_int, eps: f32, stream: Stream) !Self {
-        const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
-        return Self{
-            .dims = dims,
-            .eps = eps,
-            .weight = arrayNew(),
-            .bias = arrayNew(),
-            .stream = stream,
-            .key = key,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn load(self: *Self, weights_map: *const MapStrArr) !void {
-        try loadArray(&self.weight, self.key, "weight", weights_map);
-        try loadArray(&self.bias, self.key, "bias", weights_map);
-    }
-
-    pub fn forward(self: *Self, result: *Array, x: Array) !void {
-        try fastLayerNorm(result, x, self.weight, self.bias, self.eps, self.stream);
-    }
-
-    pub fn deinit(self: *Self) void {
-        arrayFree(self.weight);
-        arrayFree(self.bias);
-        self.allocator.free(self.key);
-    }
-};
-
-pub const RMSNorm = struct {
-    const Self = @This();
-    key: []const u8,
-    eps: f32,
-    weight: Array,
-    stream: Stream,
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, eps: f32, stream: Stream) !Self {
-        const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
-        return Self{
-            .weight = arrayNew(),
-            .eps = eps,
-            .stream = stream,
-            .key = key,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn load(self: *Self, weights_map: *const MapStrArr) !void {
-        try loadArray(&self.weight, self.key, "weight", weights_map);
-    }
-
-    pub fn forward(self: *Self, result: *Array, x: Array) !void {
-        try fastRmsNorm(result, x, self.weight, self.eps, self.stream);
-    }
-
-    pub fn deinit(self: *Self) void {
-        arrayFree(self.weight);
-        self.allocator.free(self.key);
-    }
-};
-
-pub const Conv1d = struct {
-    const Self = @This();
-    key: []const u8,
-    in_channels: c_int,
-    out_channels: c_int,
-    kernel_size: c_int,
-    stride: c_int,
-    padding: c_int,
-    dilation: c_int,
-    groups: c_int,
-    has_bias: bool,
-    weight: Array,
-    bias: ?Array,
-    stream: Stream,
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, in_channels: c_int, out_channels: c_int, kernel_size: c_int, stride: c_int, padding: c_int, stream: Stream) !Self {
-        const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
-        return Self{
-            .in_channels = in_channels,
-            .out_channels = out_channels,
-            .kernel_size = kernel_size,
-            .stride = stride,
-            .padding = padding,
-            .dilation = 1,
-            .groups = 1,
-            .has_bias = true,
-            .weight = arrayNew(),
-            .bias = arrayNew(),
-            .stream = stream,
-            .key = key,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: *Self) void {
-        arrayFree(self.weight);
-        if (self.has_bias) {
-            arrayFree(self.bias.?);
-        }
-        self.allocator.free(self.key);
-    }
-    pub fn load(self: *Self, weights_map: *const MapStrArr) !void {
-        try loadArray(&self.weight, self.key, "weight", weights_map);
-        try mlxOp(C.mlx_swapaxes(&self.weight, self.weight, 1, 2, self.stream));
-        if (self.has_bias) {
-            try loadArray(&self.bias.?, self.key, "bias", weights_map);
-        }
-    }
-
-    pub fn forward(self: *Self, result: *Array, x: Array) !void {
-        try mlxOp(C.mlx_conv1d(result, x, self.weight, self.stride, self.padding, self.dilation, self.groups, self.stream));
-        if (self.has_bias) {
-            try add(result, result.*, self.bias.?, self.stream);
-        }
-    }
-};
-
-pub fn gelu(result: *Array, x: Array, stream: Stream) !void {
-    var tmp = arrayNew();
-    defer arrayFree(tmp);
-    try divide(&tmp, x, float(@sqrt(2.0)), stream);
-    try mlxOp(C.mlx_erf(&tmp, tmp, stream));
-    try add(&tmp, tmp, float(1.0), stream);
-    try multiply(&tmp, tmp, float(0.5), stream);
-    try multiply(result, x, tmp, stream);
-}
-
-pub fn silu(result: *Array, x: Array, stream: Stream) !void {
-    var tmp = arrayNew();
-    defer arrayFree(tmp);
-    try mlxOp(C.mlx_sigmoid(&tmp, x, stream));
-    try mlxOp(C.mlx_multiply(result, tmp, x, stream));
-}
-
-/// ============================================================================
 /// Helpers
 /// ============================================================================
-pub const FloatArg = struct {
-    value: f32,
-
-    pub fn init(value: f32) FloatArg {
-        return .{ .value = value };
-    }
-};
-
-pub const IntArg = struct {
-    value: c_int,
-
-    pub fn init(value: anytype) IntArg {
-        return .{ .value = @intCast(value) };
-    }
-};
-
-pub const BoolArg = struct {
-    value: bool,
-
-    pub fn init(value: bool) BoolArg {
-        return .{ .value = value };
-    }
-};
-
-pub const float = FloatArg.init;
-pub const int = IntArg.init;
-pub const bool_ = BoolArg.init;
-
 pub fn mlxOp(result: c_int) !void {
     if (result != 0) return error.MLXOperationFailed;
 }
@@ -836,61 +573,89 @@ fn toArray(value: anytype) struct { arr: C.mlx_array, temp: bool } {
     }
 }
 
-/// ============================================================================
-/// Data Structures
-/// ============================================================================
-pub const QuantConfig = struct {
-    group_size: c_int,
-    bits: c_int,
+pub const FloatArg = struct {
+    value: f32,
+
+    pub fn init(value: f32) FloatArg {
+        return .{ .value = value };
+    }
 };
 
+pub const IntArg = struct {
+    value: c_int,
+
+    pub fn init(value: anytype) IntArg {
+        return .{ .value = @intCast(value) };
+    }
+};
+
+pub const BoolArg = struct {
+    value: bool,
+
+    pub fn init(value: bool) BoolArg {
+        return .{ .value = value };
+    }
+};
+
+pub const float = FloatArg.init;
+pub const int = IntArg.init;
+pub const bool_ = BoolArg.init;
+
+/// ============================================================================
+/// Custom Operations
+/// ============================================================================
 pub const Weight = struct {
     const Self = @This();
-    weight: C.mlx_array,
+    allocator: std.mem.Allocator,
+    weight: Array,
     is_quantized: bool,
-    scales: ?C.mlx_array = null,
-    biases: ?C.mlx_array = null,
-    group_size: ?c_int = null,
-    bits: ?c_int = null,
-    stream: C.mlx_stream,
+    scales: ?Array,
+    biases: ?Array,
+    group_size: ?c_int,
+    bits: ?c_int,
+    stream: Stream,
+    allocs_to_free: std.ArrayList([]const u8),
 
-    pub fn init(quant_config: ?QuantConfig, stream: C.mlx_stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, quant_config: ?QuantConfig, key: []const u8, weights_hash: *std.StringHashMap(*Array), stream: Stream) !*Self {
         const is_quantized = quant_config != null;
-        return Self{
-            .weight = C.mlx_array_new(),
+        var self = try allocator.create(Self);
+        self.* = .{
+            .allocator = allocator,
+            .weight = arrayNew(),
             .is_quantized = is_quantized,
-            .scales = if (is_quantized) C.mlx_array_new() else null,
-            .biases = if (is_quantized) C.mlx_array_new() else null,
+            .scales = if (is_quantized) arrayNew() else null,
+            .biases = if (is_quantized) arrayNew() else null,
             .group_size = if (is_quantized) quant_config.?.group_size else null,
             .bits = if (is_quantized) quant_config.?.bits else null,
             .stream = stream,
+            .allocs_to_free = std.ArrayList([]const u8).init(allocator),
         };
-    }
-
-    pub fn load(self: *Self, key: []const u8, weights_map: *const C.mlx_map_string_to_array) !void {
-        if (self.is_quantized) {
-            try loadArray(&self.weight, key, "weight", weights_map);
-            try loadArray(&self.scales.?, key, "scales", weights_map);
-            try loadArray(&self.biases.?, key, "biases", weights_map);
-        } else {
-            try loadArray(&self.weight, key, "weight", weights_map);
+        const weight_key = try std.fmt.allocPrint(allocator, "{s}.weight", .{key});
+        try self.allocs_to_free.append(weight_key);
+        try weights_hash.put(weight_key, &self.weight);
+        if (is_quantized) {
+            const scales_key = try std.fmt.allocPrint(allocator, "{s}.scales", .{key});
+            try weights_hash.put(scales_key, &self.scales.?);
+            try self.allocs_to_free.append(scales_key);
+            const biases_key = try std.fmt.allocPrint(allocator, "{s}.biases", .{key});
+            try weights_hash.put(biases_key, &self.biases.?);
+            try self.allocs_to_free.append(biases_key);
         }
+        return self;
     }
 
-    pub fn loadDequantized(self: *Self, key: []const u8, weights_map: *const C.mlx_map_string_to_array) !void {
-        try self.load(key, weights_map);
+    pub fn deinit(self: *Self) void {
+        arrayFree(self.weight);
         if (self.is_quantized) {
-            try mlxOp(C.mlx_dequantize(&self.weight, self.weight, self.scales.?, self.biases.?, self.group_size.?, self.bits.?, self.stream));
-            try mlxOp(C.mlx_array_free(self.scales.?));
-            try mlxOp(C.mlx_array_free(self.biases.?));
-            try mlxOp(C.mlx_array_eval(self.weight));
-            self.is_quantized = false;
-            self.group_size = null;
-            self.bits = null;
+            arrayFree(self.scales.?);
+            arrayFree(self.biases.?);
         }
+        for (self.allocs_to_free.items) |key| self.allocator.free(key);
+        self.allocs_to_free.deinit();
+        self.allocator.destroy(self);
     }
 
-    pub fn forward(self: *Self, result: *C.mlx_array, x: C.mlx_array) !void {
+    pub fn forward(self: *Self, result: *Array, x: Array) !void {
         if (self.is_quantized) {
             try mlxOp(C.mlx_quantized_matmul(result, x, self.weight, self.scales.?, self.biases.?, true, self.group_size.?, self.bits.?, self.stream));
         } else {
@@ -898,101 +663,283 @@ pub const Weight = struct {
         }
     }
 
-    pub fn deinit(self: *Self) void {
-        _ = C.mlx_array_free(self.weight);
+    pub fn dequantize(self: *Self) !void {
         if (self.is_quantized) {
-            _ = C.mlx_array_free(self.scales.?);
-            _ = C.mlx_array_free(self.biases.?);
+            var temp = arrayNew();
+            defer arrayFree(temp);
+            try mlxOp(C.mlx_dequantize(&temp, self.weight, self.scales.?, self.biases.?, self.group_size.?, self.bits.?, self.stream));
+            try mlxOp(C.mlx_array_set(&self.weight, temp));
+            try mlxOp(C.mlx_array_eval(self.weight));
+            arrayFree(self.scales.?);
+            arrayFree(self.biases.?);
+            self.scales = null;
+            self.biases = null;
+            self.is_quantized = false;
         }
     }
 };
 
-pub const KVCache = struct {
+pub const Linear = struct {
     const Self = @This();
-
-    k: C.mlx_array,
-    v: C.mlx_array,
-    axis: c_int,
-    is_empty: bool = true,
-
-    pub fn init(axis: c_int) Self {
-        return Self{ .k = C.mlx_array_new(), .v = C.mlx_array_new(), .axis = axis };
-    }
-
-    fn sliceCache(self: *Self, offset: c_int, stream: C.mlx_stream) !void {
-        if (offset >= C.mlx_array_dim(self.k, self.axis)) return;
-        const ndim = C.mlx_array_ndim(self.k);
-        const start = [_]c_int{0} ** 4;
-        const strides = [_]c_int{1} ** 4;
-        var stop = [_]c_int{0} ** 4;
-        for (0..ndim) |idx| stop[idx] = C.mlx_array_dim(self.k, @intCast(idx));
-        stop[@intCast(self.axis)] = offset;
-        try mlxOp(C.mlx_slice(&self.k, self.k, &start, ndim, &stop, ndim, &strides, ndim, stream));
-        try mlxOp(C.mlx_slice(&self.k, self.v, &start, ndim, &stop, ndim, &strides, ndim, stream));
-        std.debug.print("Cache offset set to {d}\n", .{offset});
-    }
-
-    pub fn update(self: *Self, k: *C.mlx_array, v: *C.mlx_array, offset: ?c_int, stream: C.mlx_stream) !void {
-        const offset_ = if (offset) |o| o else if (self.is_empty) 0 else C.mlx_array_dim(self.k, self.axis);
-        if (offset_ > 0) {
-            try self.sliceCache(offset_, stream);
-            var k_concat = [_]C.mlx_array{ self.k, k.* };
-            const k_vec = C.mlx_vector_array_new_data(&k_concat[0], 2);
-            defer _ = C.mlx_vector_array_free(k_vec);
-            try mlxOp(C.mlx_concatenate(k, k_vec, self.axis, stream));
-            var v_concat = [_]C.mlx_array{ self.v, v.* };
-            const v_vec = C.mlx_vector_array_new_data(&v_concat[0], 2);
-            defer _ = C.mlx_vector_array_free(v_vec);
-            try mlxOp(C.mlx_concatenate(v, v_vec, self.axis, stream));
-        }
-        try mlxOp(C.mlx_array_set(&self.k, k.*));
-        try mlxOp(C.mlx_array_set(&self.v, v.*));
-        self.is_empty = false;
-    }
-
-    pub fn get(self: *Self, k: *C.mlx_array, v: *C.mlx_array) !void {
-        try mlxOp(C.mlx_array_set(k, self.k));
-        try mlxOp(C.mlx_array_set(v, self.v));
-    }
-
-    pub fn set(self: *Self, k: *C.mlx_array, v: *C.mlx_array) !void {
-        try mlxOp(C.mlx_array_set(&self.k, k.*));
-        try mlxOp(C.mlx_array_set(&self.v, v.*));
-        self.is_empty = false;
-    }
-
-    pub fn deinit(self: *Self) void {
-        _ = C.mlx_array_free(self.k);
-        _ = C.mlx_array_free(self.v);
-    }
-};
-
-pub const Cache = struct {
-    const Self = @This();
-
-    layers: []KVCache,
-    offset: c_int,
+    weight: *Weight,
+    has_bias: bool,
+    bias: ?Array,
+    stream: Stream,
     allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator, num_layers: usize, axis: c_int) !Self {
-        var layers = try allocator.alloc(KVCache, num_layers);
-        for (0..num_layers) |idx| {
-            layers[idx] = KVCache.init(axis);
-        }
-        return Self{
-            .layers = layers,
-            .offset = 0,
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, has_bias: bool, quant_config: ?QuantConfig, weights_hash: *std.StringHashMap(*Array), stream: Stream) !*Self {
+        const key = try allocJoin(allocator, parent, name);
+        var self = try allocator.create(Self);
+        self.* = .{
+            .weight = try Weight.init(allocator, quant_config, key, weights_hash, stream),
+            .has_bias = has_bias,
+            .bias = if (has_bias) arrayNew() else null,
+            .stream = stream,
             .allocator = allocator,
+            .allocs_to_free = std.ArrayList([]const u8).init(allocator),
         };
+        try self.allocs_to_free.append(key);
+        if (has_bias) {
+            const bias_key = try allocJoin(allocator, key, "bias");
+            try weights_hash.put(bias_key, &self.bias.?);
+            try self.allocs_to_free.append(key);
+        }
+        return self;
     }
 
     pub fn deinit(self: *Self) void {
-        for (self.layers) |*cache| {
-            cache.deinit();
+        self.weight.deinit();
+        if (self.has_bias) {
+            arrayFree(self.bias.?);
         }
-        self.allocator.free(self.layers);
+        for (self.allocs_to_free.items) |key| self.allocator.free(key);
+        self.allocs_to_free.deinit();
+        self.allocator.destroy(self);
+    }
+
+    pub fn forward(self: *Self, result: *Array, x: Array) !void {
+        try self.weight.forward(result, x);
+        if (self.has_bias) {
+            try add(result, result.*, self.bias.?, self.stream);
+        }
     }
 };
+
+pub const Embedding = struct {
+    const Self = @This();
+    weight: *Weight,
+    stream: Stream,
+    is_sanitized: bool = false,
+    allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
+
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, quant_config: ?QuantConfig, weights_hash: *std.StringHashMap(*Array), stream: Stream) !*Self {
+        const key = try allocJoin(allocator, parent, name);
+        var self = try allocator.create(Self);
+        self.* = .{
+            .weight = try Weight.init(allocator, quant_config, key, weights_hash, stream),
+            .stream = stream,
+            .allocator = allocator,
+            .allocs_to_free = std.ArrayList([]const u8).init(allocator),
+        };
+        try self.allocs_to_free.append(key);
+        return self;
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.weight.deinit();
+        for (self.allocs_to_free.items) |key| self.allocator.free(key);
+        self.allocs_to_free.deinit();
+        self.allocator.destroy(self);
+    }
+
+    pub fn sanitize(self: *Self) !void {
+        if (!self.is_sanitized) {
+            try self.weight.dequantize();
+            try self.weight.dequantize();
+            self.is_sanitized = true;
+        }
+    }
+
+    pub fn forward(self: *Self, result: *Array, toks: Array) !void {
+        try self.sanitize();
+        try take(result, self.weight.weight, toks, 0, self.stream);
+    }
+
+    pub fn asLinear(self: *Self, result: *Array, x: Array) !void {
+        try self.weight.forward(result, x);
+    }
+};
+
+pub const RMSNorm = struct {
+    const Self = @This();
+    eps: f32,
+    weight: Array,
+    stream: Stream,
+    allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
+
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, eps: f32, weights_hash: *std.StringHashMap(*Array), stream: Stream) !*Self {
+        const key = try allocJoin(allocator, parent, name);
+        var self = try allocator.create(Self);
+        self.* = .{
+            .weight = arrayNew(),
+            .eps = eps,
+            .stream = stream,
+            .allocator = allocator,
+            .allocs_to_free = std.ArrayList([]const u8).init(allocator),
+        };
+        try self.allocs_to_free.append(key);
+        const weight_key = try allocJoin(allocator, key, "weight");
+        try weights_hash.put(weight_key, &self.weight);
+        try self.allocs_to_free.append(weight_key);
+        return self;
+    }
+
+    pub fn deinit(self: *Self) void {
+        arrayFree(self.weight);
+        for (self.allocs_to_free.items) |key| self.allocator.free(key);
+        self.allocs_to_free.deinit();
+        self.allocator.destroy(self);
+    }
+
+    pub fn forward(self: *Self, result: *Array, x: Array) !void {
+        try fastRmsNorm(result, x, self.weight, self.eps, self.stream);
+    }
+};
+
+pub const LayerNorm = struct {
+    const Self = @This();
+    eps: f32,
+    weight: Array,
+    bias: Array,
+    stream: Stream,
+    allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
+
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, eps: f32, weights_hash: *std.StringHashMap(*Array), stream: Stream) !*Self {
+        const key = try allocJoin(allocator, parent, name);
+        var self = try allocator.create(Self);
+        self.* = .{
+            .eps = eps,
+            .weight = arrayNew(),
+            .bias = arrayNew(),
+            .stream = stream,
+            .allocator = allocator,
+            .allocs_to_free = std.ArrayList([]const u8).init(allocator),
+        };
+        try self.allocs_to_free.append(key);
+        const weight_key = try allocJoin(allocator, key, "weight");
+        try weights_hash.put(weight_key, &self.weight);
+        try self.allocs_to_free.append(weight_key);
+        const bias_key = try allocJoin(allocator, key, "bias");
+        try weights_hash.put(bias_key, &self.bias);
+        try self.allocs_to_free.append(bias_key);
+        return self;
+    }
+
+    pub fn deinit(self: *Self) void {
+        arrayFree(self.weight);
+        arrayFree(self.bias);
+        for (self.allocs_to_free.items) |key| self.allocator.free(key);
+        self.allocs_to_free.deinit();
+        self.allocator.destroy(self);
+    }
+
+    pub fn forward(self: *Self, result: *Array, x: Array) !void {
+        try fastLayerNorm(result, x, self.weight, self.bias, self.eps, self.stream);
+    }
+};
+
+pub const Conv1d = struct {
+    const Self = @This();
+    stride: c_int,
+    padding: c_int,
+    dilation: c_int,
+    groups: c_int,
+    has_bias: bool,
+    weight: Array,
+    is_sanitized: bool = false,
+    bias: ?Array,
+    stream: Stream,
+    allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
+
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, stride: c_int, padding: c_int, dilation: c_int, groups: c_int, has_bias: bool, weights_hash: *std.StringHashMap(*Array), stream: Stream) !*Self {
+        const key = try allocJoin(allocator, parent, name);
+        var self = try allocator.create(Self);
+        self.* = .{
+            .stride = stride,
+            .padding = padding,
+            .dilation = dilation,
+            .groups = groups,
+            .has_bias = has_bias,
+            .weight = arrayNew(),
+            .bias = if (has_bias) arrayNew() else null,
+            .stream = stream,
+            .allocator = allocator,
+            .allocs_to_free = std.ArrayList([]const u8).init(allocator),
+        };
+        try self.allocs_to_free.append(key);
+        const weight_key = try allocJoin(allocator, key, "weight");
+        try weights_hash.put(weight_key, &self.weight);
+        try self.allocs_to_free.append(weight_key);
+        if (has_bias) {
+            const bias_key = try allocJoin(allocator, key, "bias");
+            try weights_hash.put(bias_key, &self.bias.?);
+            try self.allocs_to_free.append(bias_key);
+        }
+        return self;
+    }
+
+    pub fn deinit(self: *Self) void {
+        arrayFree(self.weight);
+        if (self.has_bias) {
+            arrayFree(self.bias.?);
+        }
+        for (self.allocs_to_free.items) |key| self.allocator.free(key);
+        self.allocs_to_free.deinit();
+        self.allocator.destroy(self);
+    }
+
+    pub fn sanitize(self: *Self) !void {
+        if (!self.is_sanitized) {
+            try mlxOp(C.mlx_swapaxes(&self.weight, self.weight, 1, 2, self.stream));
+            self.is_sanitized = true;
+        }
+    }
+
+    pub fn forward(self: *Self, result: *Array, x: Array) !void {
+        try self.sanitize();
+        try mlxOp(C.mlx_conv1d(result, x, self.weight, self.stride, self.padding, self.dilation, self.groups, self.stream));
+        if (self.has_bias) {
+            try add(result, result.*, self.bias.?, self.stream);
+        }
+    }
+};
+
+pub const QuantConfig = struct {
+    group_size: c_int,
+    bits: c_int,
+};
+
+pub fn gelu(result: *Array, x: Array, stream: Stream) !void {
+    var tmp = arrayNew();
+    defer arrayFree(tmp);
+    try divide(&tmp, x, float(@sqrt(2.0)), stream);
+    try mlxOp(C.mlx_erf(&tmp, tmp, stream));
+    try add(&tmp, tmp, float(1.0), stream);
+    try multiply(&tmp, tmp, float(0.5), stream);
+    try multiply(result, x, tmp, stream);
+}
+
+pub fn silu(result: *Array, x: Array, stream: Stream) !void {
+    var tmp = arrayNew();
+    defer arrayFree(tmp);
+    try mlxOp(C.mlx_sigmoid(&tmp, x, stream));
+    try mlxOp(C.mlx_multiply(result, tmp, x, stream));
+}
 
 /// ============================================================================
 /// File I/O and Model Loading
@@ -1021,6 +968,7 @@ pub const Safetensors = struct {
             _ = C.mlx_map_string_to_array_free(weights);
             return error.LoadWeightsFailed;
         }
+        // try printMapArr("Safetensors", &weights);
         return Self{
             .file = file,
             .weights = weights,
@@ -1028,6 +976,25 @@ pub const Safetensors = struct {
             .added_tensors = null,
             .allocator = null,
         };
+    }
+
+    pub fn unload(self: *Self, weights_hash: *std.StringHashMap(*Array)) !void {
+        const mapsa_iter = C.mlx_map_string_to_array_iterator_new(self.weights);
+        defer _ = C.mlx_map_string_to_array_iterator_free(mapsa_iter);
+        var key: [*c]const u8 = undefined;
+        var value = C.mlx_array_new();
+        defer _ = C.mlx_array_free(value);
+        while (C.mlx_map_string_to_array_iterator_next(&key, &value, mapsa_iter) == 0) {
+            const key_str = std.mem.span(key);
+            // std.debug.print("\nUnloading {s}\n", .{key_str});
+            if (weights_hash.get(key_str)) |weight_ptr| {
+                try mlxOp(C.mlx_array_set(weight_ptr, value));
+                try mlxOp(C.mlx_array_eval(weight_ptr.*));
+            } else {
+                std.debug.print("\nKey not found in weights_hash: {s}\n", .{key_str});
+                return error.KeyNotFoundInWeightsHash;
+            }
+        }
     }
 
     pub fn add(self: *Self, paths: []const [:0]const u8, allocator: std.mem.Allocator) !void {
@@ -1128,6 +1095,96 @@ pub fn printMapArr(msg: []const u8, map: *const C.mlx_map_string_to_array) !void
 }
 
 /// ============================================================================
+/// KV Cache
+/// ============================================================================
+pub const KVCache = struct {
+    const Self = @This();
+
+    k: C.mlx_array,
+    v: C.mlx_array,
+    axis: c_int,
+    is_empty: bool = true,
+
+    pub fn init(axis: c_int) Self {
+        return Self{ .k = C.mlx_array_new(), .v = C.mlx_array_new(), .axis = axis };
+    }
+
+    fn sliceCache(self: *Self, offset: c_int, stream: C.mlx_stream) !void {
+        if (offset >= C.mlx_array_dim(self.k, self.axis)) return;
+        const ndim = C.mlx_array_ndim(self.k);
+        const start = [_]c_int{0} ** 4;
+        const strides = [_]c_int{1} ** 4;
+        var stop = [_]c_int{0} ** 4;
+        for (0..ndim) |idx| stop[idx] = C.mlx_array_dim(self.k, @intCast(idx));
+        stop[@intCast(self.axis)] = offset;
+        try mlxOp(C.mlx_slice(&self.k, self.k, &start, ndim, &stop, ndim, &strides, ndim, stream));
+        try mlxOp(C.mlx_slice(&self.k, self.v, &start, ndim, &stop, ndim, &strides, ndim, stream));
+        std.debug.print("Cache offset set to {d}\n", .{offset});
+    }
+
+    pub fn update(self: *Self, k: *C.mlx_array, v: *C.mlx_array, offset: ?c_int, stream: C.mlx_stream) !void {
+        const offset_ = if (offset) |o| o else if (self.is_empty) 0 else C.mlx_array_dim(self.k, self.axis);
+        if (offset_ > 0) {
+            try self.sliceCache(offset_, stream);
+            var k_concat = [_]C.mlx_array{ self.k, k.* };
+            const k_vec = C.mlx_vector_array_new_data(&k_concat[0], 2);
+            defer _ = C.mlx_vector_array_free(k_vec);
+            try mlxOp(C.mlx_concatenate(k, k_vec, self.axis, stream));
+            var v_concat = [_]C.mlx_array{ self.v, v.* };
+            const v_vec = C.mlx_vector_array_new_data(&v_concat[0], 2);
+            defer _ = C.mlx_vector_array_free(v_vec);
+            try mlxOp(C.mlx_concatenate(v, v_vec, self.axis, stream));
+        }
+        try mlxOp(C.mlx_array_set(&self.k, k.*));
+        try mlxOp(C.mlx_array_set(&self.v, v.*));
+        self.is_empty = false;
+    }
+
+    pub fn get(self: *Self, k: *C.mlx_array, v: *C.mlx_array) !void {
+        try mlxOp(C.mlx_array_set(k, self.k));
+        try mlxOp(C.mlx_array_set(v, self.v));
+    }
+
+    pub fn set(self: *Self, k: *C.mlx_array, v: *C.mlx_array) !void {
+        try mlxOp(C.mlx_array_set(&self.k, k.*));
+        try mlxOp(C.mlx_array_set(&self.v, v.*));
+        self.is_empty = false;
+    }
+
+    pub fn deinit(self: *Self) void {
+        _ = C.mlx_array_free(self.k);
+        _ = C.mlx_array_free(self.v);
+    }
+};
+
+pub const Cache = struct {
+    const Self = @This();
+
+    layers: []KVCache,
+    offset: c_int,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, num_layers: usize, axis: c_int) !Self {
+        var layers = try allocator.alloc(KVCache, num_layers);
+        for (0..num_layers) |idx| {
+            layers[idx] = KVCache.init(axis);
+        }
+        return Self{
+            .layers = layers,
+            .offset = 0,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        for (self.layers) |*cache| {
+            cache.deinit();
+        }
+        self.allocator.free(self.layers);
+    }
+};
+
+/// ============================================================================
 /// Experimental Array Shape Operations
 /// ============================================================================
 pub fn rEpeat(result: *C.mlx_array, x: C.mlx_array, comptime pattern: []const u8, dim_values: anytype, stream: C.mlx_stream) !void {
@@ -1146,7 +1203,6 @@ pub fn rEshap(result: *C.mlx_array, x: C.mlx_array, comptime pattern: []const u8
         const popen = std.mem.indexOf(u8, pattern, "(").?;
         const pclos = std.mem.indexOf(u8, pattern, ")").?;
         const is_lt = popen < arrow;
-
         const axis_start = a1: {
             const side = if (is_lt) pattern[0..popen] else pattern[arrow + 2 .. popen];
             var toks_1 = std.mem.tokenize(u8, side, " ");

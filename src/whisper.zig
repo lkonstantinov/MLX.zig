@@ -13,31 +13,29 @@ const formatRangeFloat = @import("utils.zig").formatRangeFloat;
 
 pub const MultiHeadAttention = struct {
     const Self = @This();
-    key: []const u8,
     n_heads: c_int,
     d_model: c_int,
     head_dim: c_int,
     scale: mlx.Array,
-    // scale: f32,
-    q_proj: mlx.Linear,
-    k_proj: mlx.Linear,
-    v_proj: mlx.Linear,
-    out_proj: mlx.Linear,
+    q_proj: *mlx.Linear,
+    k_proj: *mlx.Linear,
+    v_proj: *mlx.Linear,
+    out_proj: *mlx.Linear,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, d_model: c_int, n_heads: c_int, bias_k: bool, stream: mlx.Stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, d_model: c_int, n_heads: c_int, bias_k: bool, weights_hash: *std.StringHashMap(*mlx.Array), stream: mlx.Stream) !Self {
+        var allocs_to_free = std.ArrayList([]const u8).init(allocator);
         const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
-        const q_proj = try mlx.Linear.init(allocator, key, "q_proj", true, null, stream);
-        const k_proj = try mlx.Linear.init(allocator, key, "k_proj", bias_k, null, stream);
-        const v_proj = try mlx.Linear.init(allocator, key, "v_proj", true, null, stream);
-        const out_proj = try mlx.Linear.init(allocator, key, "out_proj", true, null, stream);
+        try allocs_to_free.append(key);
+        const q_proj = try mlx.Linear.init(allocator, key, "q_proj", true, null, weights_hash, stream);
+        const k_proj = try mlx.Linear.init(allocator, key, "k_proj", bias_k, null, weights_hash, stream);
+        const v_proj = try mlx.Linear.init(allocator, key, "v_proj", true, null, weights_hash, stream);
+        const out_proj = try mlx.Linear.init(allocator, key, "out_proj", true, null, weights_hash, stream);
         const head_dim = @divExact(d_model, n_heads);
         const scale = mlx.arrayNewFloat(1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))));
-        // const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
-        return Self{
-            .key = key,
+        return .{
             .n_heads = n_heads,
             .d_model = d_model,
             .q_proj = q_proj,
@@ -48,14 +46,18 @@ pub const MultiHeadAttention = struct {
             .allocator = allocator,
             .head_dim = head_dim,
             .scale = scale,
+            .allocs_to_free = allocs_to_free,
         };
     }
 
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.q_proj.load(weights_map);
-        try self.k_proj.load(weights_map);
-        try self.v_proj.load(weights_map);
-        try self.out_proj.load(weights_map);
+    pub fn deinit(self: *Self) void {
+        self.q_proj.deinit();
+        self.k_proj.deinit();
+        self.v_proj.deinit();
+        self.out_proj.deinit();
+        mlx.arrayFree(self.scale);
+        for (self.allocs_to_free.items) |allocation| self.allocator.free(allocation);
+        self.allocs_to_free.deinit();
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array, xa: ?mlx.Array, mask: ?mlx.Array, kv_cache: ?*mlx.KVCache) !void {
@@ -99,41 +101,33 @@ pub const MultiHeadAttention = struct {
         try mlx.rEshap(result, result.*, "b h l d -> b l (h d)", .{}, self.stream);
         try self.out_proj.forward(result, result.*);
     }
-
-    pub fn deinit(self: *Self) void {
-        self.allocator.free(self.key);
-        self.q_proj.deinit();
-        self.k_proj.deinit();
-        self.v_proj.deinit();
-        self.out_proj.deinit();
-        // mlx.arrayFree(self.scale);
-    }
 };
 
 pub const ResidualAttentionBlock = struct {
     const Self = @This();
-    key: []const u8,
     self_attn: MultiHeadAttention,
-    self_attn_layer_norm: mlx.LayerNorm,
+    self_attn_layer_norm: *mlx.LayerNorm,
     cross_attn: ?MultiHeadAttention,
-    cross_attn_layer_norm: ?mlx.LayerNorm,
-    fc1: mlx.Linear,
-    fc2: mlx.Linear,
-    final_layer_norm: mlx.LayerNorm,
+    cross_attn_layer_norm: ?*mlx.LayerNorm,
+    fc1: *mlx.Linear,
+    fc2: *mlx.Linear,
+    final_layer_norm: *mlx.LayerNorm,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: usize, d_model: c_int, n_head: c_int, cross_attention: bool, stream: mlx.Stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: usize, d_model: c_int, n_head: c_int, cross_attention: bool, weights_hash: *std.StringHashMap(*mlx.Array), stream: mlx.Stream) !Self {
+        var allocs_to_free = std.ArrayList([]const u8).init(allocator);
         const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
-        const self_attn = try MultiHeadAttention.init(allocator, key, "self_attn", d_model, n_head, false, stream);
-        const self_attn_layer_norm = try mlx.LayerNorm.init(allocator, key, "self_attn_layer_norm", d_model, 1e-5, stream);
-        const cross_attn = if (cross_attention) try MultiHeadAttention.init(allocator, key, "encoder_attn", d_model, n_head, false, stream) else null;
-        const cross_attn_layer_norm = if (cross_attention) try mlx.LayerNorm.init(allocator, key, "encoder_attn_layer_norm", d_model, 1e-5, stream) else null;
-        const fc1 = try mlx.Linear.init(allocator, key, "fc1", true, null, stream);
-        const fc2 = try mlx.Linear.init(allocator, key, "fc2", true, null, stream);
-        const final_layer_norm = try mlx.LayerNorm.init(allocator, key, "final_layer_norm", d_model, 1e-5, stream);
-        return Self{
+        try allocs_to_free.append(key);
+        const self_attn = try MultiHeadAttention.init(allocator, key, "self_attn", d_model, n_head, false, weights_hash, stream);
+        const self_attn_layer_norm = try mlx.LayerNorm.init(allocator, key, "self_attn_layer_norm", 1e-5, weights_hash, stream);
+        const cross_attn = if (cross_attention) try MultiHeadAttention.init(allocator, key, "encoder_attn", d_model, n_head, false, weights_hash, stream) else null;
+        const cross_attn_layer_norm = if (cross_attention) try mlx.LayerNorm.init(allocator, key, "encoder_attn_layer_norm", 1e-5, weights_hash, stream) else null;
+        const fc1 = try mlx.Linear.init(allocator, key, "fc1", true, null, weights_hash, stream);
+        const fc2 = try mlx.Linear.init(allocator, key, "fc2", true, null, weights_hash, stream);
+        const final_layer_norm = try mlx.LayerNorm.init(allocator, key, "final_layer_norm", 1e-5, weights_hash, stream);
+        return .{
             .self_attn = self_attn,
             .self_attn_layer_norm = self_attn_layer_norm,
             .cross_attn = cross_attn,
@@ -143,22 +137,24 @@ pub const ResidualAttentionBlock = struct {
             .final_layer_norm = final_layer_norm,
             .stream = stream,
             .allocator = allocator,
-            .key = key,
+            .allocs_to_free = allocs_to_free,
         };
     }
 
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.self_attn.load(weights_map);
-        try self.self_attn_layer_norm.load(weights_map);
+    pub fn deinit(self: *Self) void {
+        self.self_attn.deinit();
+        self.self_attn_layer_norm.deinit();
         if (self.cross_attn) |*cross_attn| {
-            try cross_attn.load(weights_map);
+            cross_attn.deinit();
         }
-        if (self.cross_attn_layer_norm) |*cross_attn_layer_norm| {
-            try cross_attn_layer_norm.load(weights_map);
+        if (self.cross_attn_layer_norm) |cross_attn_layer_norm| {
+            cross_attn_layer_norm.deinit();
         }
-        try self.fc1.load(weights_map);
-        try self.fc2.load(weights_map);
-        try self.final_layer_norm.load(weights_map);
+        self.fc1.deinit();
+        self.fc2.deinit();
+        self.final_layer_norm.deinit();
+        for (self.allocs_to_free.items) |allocation| self.allocator.free(allocation);
+        self.allocs_to_free.deinit();
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array, xa: ?mlx.Array, mask: ?mlx.Array, kv_cache: ?*mlx.KVCache, cross_kv_cache: ?*mlx.KVCache) !void {
@@ -184,69 +180,66 @@ pub const ResidualAttentionBlock = struct {
         try self.fc2.forward(&xatn, xatn);
         try mlx.add(result, xatn, attn, self.stream);
     }
-
-    pub fn deinit(self: *Self) void {
-        self.allocator.free(self.key);
-        self.self_attn.deinit();
-        self.self_attn_layer_norm.deinit();
-        if (self.cross_attn) |*cross_attn| {
-            cross_attn.deinit();
-        }
-        if (self.cross_attn_layer_norm) |*cross_attn_layer_norm| {
-            cross_attn_layer_norm.deinit();
-        }
-        self.fc1.deinit();
-        self.fc2.deinit();
-        self.final_layer_norm.deinit();
-    }
 };
 
 pub const AudioEncoder = struct {
     const Self = @This();
-    key: []const u8,
-    conv1: mlx.Conv1d,
-    conv2: mlx.Conv1d,
+    conv1: *mlx.Conv1d,
+    conv2: *mlx.Conv1d,
     positional_embedding: mlx.Array,
     layers: []ResidualAttentionBlock,
-    layer_norm: mlx.LayerNorm,
+    layer_norm: *mlx.LayerNorm,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, config: *const WhisperConfig, stream: mlx.Stream) !Self {
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, config: *const WhisperConfig, weights_hash: *std.StringHashMap(*mlx.Array), stream: mlx.Stream) !*Self {
+        var allocs_to_free = std.ArrayList([]const u8).init(allocator);
         const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
-        const conv1 = try mlx.Conv1d.init(allocator, key, "conv1", config.num_mel_bins, config.d_model, 3, 1, 1, stream);
-        const conv2 = try mlx.Conv1d.init(allocator, key, "conv2", config.d_model, config.d_model, 3, 2, 1, stream);
-        var positional_embedding = mlx.arrayNew();
-        try createSinusoids(&positional_embedding, config.max_source_positions, config.d_model, stream);
-        try mlx.astype(&positional_embedding, positional_embedding, mlx.DTYPE.FLOAT16, stream);
-        const layer_norm = try mlx.LayerNorm.init(allocator, key, "layer_norm", config.d_model, 1e-5, stream);
+        try allocs_to_free.append(key);
+        const conv1 = try mlx.Conv1d.init(allocator, key, "conv1", 1, 1, 1, 1, true, weights_hash, stream);
+        const conv2 = try mlx.Conv1d.init(allocator, key, "conv2", 2, 1, 1, 1, true, weights_hash, stream);
+        const layer_norm = try mlx.LayerNorm.init(allocator, key, "layer_norm", 1e-5, weights_hash, stream);
         var layers = try allocator.alloc(ResidualAttentionBlock, @intCast(config.encoder_layers));
-        errdefer allocator.free(layers);
         const layers_key = try allocJoin(allocator, key, "layers");
-        defer allocator.free(layers_key);
+        try allocs_to_free.append(layers_key);
         for (0..@intCast(config.encoder_layers)) |i| {
-            layers[i] = try ResidualAttentionBlock.init(allocator, layers_key, i, config.d_model, config.encoder_attention_heads, false, stream);
+            layers[i] = try ResidualAttentionBlock.init(allocator, layers_key, i, config.d_model, config.encoder_attention_heads, false, weights_hash, stream);
         }
-        return Self{
+        var self = try allocator.create(Self);
+        self.* = .{
             .conv1 = conv1,
             .conv2 = conv2,
-            .positional_embedding = positional_embedding,
+            .positional_embedding = mlx.arrayNew(),
             .layers = layers,
             .layer_norm = layer_norm,
             .stream = stream,
             .allocator = allocator,
-            .key = key,
+            .allocs_to_free = allocs_to_free,
         };
+
+        // var positional_embedding = mlx.arrayNew();
+        // try createSinusoids(&positional_embedding, config.max_source_positions, config.d_model, stream);
+        // try mlx.astype(&positional_embedding, positional_embedding, mlx.DTYPE.FLOAT16, stream);
+
+        const pe_key = try allocJoin(allocator, key, "embed_positions.weight");
+        try self.allocs_to_free.append(pe_key);
+        try weights_hash.put(pe_key, &self.positional_embedding);
+        return self;
     }
 
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.conv1.load(weights_map);
-        try self.conv2.load(weights_map);
+    pub fn deinit(self: *Self) void {
+        self.conv1.deinit();
+        self.conv2.deinit();
+        mlx.arrayFree(self.positional_embedding);
         for (self.layers) |*layer| {
-            try layer.load(weights_map);
+            layer.deinit();
         }
-        try self.layer_norm.load(weights_map);
+        self.allocator.free(self.layers);
+        self.layer_norm.deinit();
+        for (self.allocs_to_free.items) |allocation| self.allocator.free(allocation);
+        self.allocs_to_free.deinit();
+        self.allocator.destroy(self);
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array) !void {
@@ -260,61 +253,57 @@ pub const AudioEncoder = struct {
         }
         try self.layer_norm.forward(result, result.*);
     }
+};
+
+pub const TextDecoder = struct {
+    const Self = @This();
+    embed_tokens: *mlx.Embedding,
+    positional_embedding: mlx.Array,
+    layers: []ResidualAttentionBlock,
+    layer_norm: *mlx.LayerNorm,
+    stream: mlx.Stream,
+    allocator: std.mem.Allocator,
+    allocs_to_free: std.ArrayList([]const u8),
+
+    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, config: *const WhisperConfig, weights_hash: *std.StringHashMap(*mlx.Array), stream: mlx.Stream) !*Self {
+        var allocs_to_free = std.ArrayList([]const u8).init(allocator);
+        const key = try allocJoin(allocator, parent, name);
+        try allocs_to_free.append(key);
+        const embed_tokens = try mlx.Embedding.init(allocator, key, "embed_tokens", null, weights_hash, stream);
+        const layer_norm = try mlx.LayerNorm.init(allocator, key, "layer_norm", 1e-5, weights_hash, stream);
+        var layers = try allocator.alloc(ResidualAttentionBlock, @intCast(config.decoder_layers));
+        const layers_key = try allocJoin(allocator, key, "layers");
+        try allocs_to_free.append(layers_key);
+        for (0..@intCast(config.decoder_layers)) |i| {
+            layers[i] = try ResidualAttentionBlock.init(allocator, layers_key, i, config.d_model, config.decoder_attention_heads, true, weights_hash, stream);
+        }
+        var self = try allocator.create(Self);
+        self.* = .{
+            .embed_tokens = embed_tokens,
+            .positional_embedding = mlx.arrayNew(),
+            .layers = layers,
+            .layer_norm = layer_norm,
+            .stream = stream,
+            .allocator = allocator,
+            .allocs_to_free = allocs_to_free,
+        };
+        const pe_key = try allocJoin(allocator, key, "embed_positions.weight");
+        try self.allocs_to_free.append(pe_key);
+        try weights_hash.put(pe_key, &self.positional_embedding);
+        return self;
+    }
 
     pub fn deinit(self: *Self) void {
-        self.conv1.deinit();
-        self.conv2.deinit();
+        self.embed_tokens.deinit();
         mlx.arrayFree(self.positional_embedding);
         for (self.layers) |*layer| {
             layer.deinit();
         }
         self.allocator.free(self.layers);
         self.layer_norm.deinit();
-        self.allocator.free(self.key);
-    }
-};
-
-pub const TextDecoder = struct {
-    const Self = @This();
-    key: []const u8,
-    embed_tokens: mlx.Embedding,
-    positional_embedding: mlx.Array,
-    layers: []ResidualAttentionBlock,
-    layer_norm: mlx.LayerNorm,
-    stream: mlx.Stream,
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator, parent: []const u8, name: []const u8, config: *const WhisperConfig, stream: mlx.Stream) !Self {
-        const key = try allocJoin(allocator, parent, name);
-        errdefer allocator.free(key);
-        const embed_tokens = try mlx.Embedding.init(allocator, key, "embed_tokens", null, stream);
-        const positional_embedding = mlx.arrayNew();
-        const layer_norm = try mlx.LayerNorm.init(allocator, key, "layer_norm", config.d_model, 1e-5, stream);
-        var layers = try allocator.alloc(ResidualAttentionBlock, @intCast(config.decoder_layers));
-        errdefer allocator.free(layers);
-        const layers_key = try allocJoin(allocator, key, "layers");
-        defer allocator.free(layers_key);
-        for (0..@intCast(config.decoder_layers)) |i| {
-            layers[i] = try ResidualAttentionBlock.init(allocator, layers_key, i, config.d_model, config.decoder_attention_heads, true, stream);
-        }
-        return Self{
-            .embed_tokens = embed_tokens,
-            .positional_embedding = positional_embedding,
-            .layers = layers,
-            .layer_norm = layer_norm,
-            .stream = stream,
-            .allocator = allocator,
-            .key = key,
-        };
-    }
-
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.embed_tokens.load(weights_map);
-        try mlx.loadArray(&self.positional_embedding, self.key, "embed_positions.weight", weights_map);
-        for (self.layers) |*layer| {
-            try layer.load(weights_map);
-        }
-        try self.layer_norm.load(weights_map);
+        for (self.allocs_to_free.items) |allocation| self.allocator.free(allocation);
+        self.allocs_to_free.deinit();
+        self.allocator.destroy(self);
     }
 
     pub fn forward(self: *Self, result: *mlx.Array, x: mlx.Array, xa: mlx.Array, mask: mlx.Array, kv_cache: *mlx.Cache, cross_kv_cache: *mlx.Cache) !void {
@@ -330,40 +319,24 @@ pub const TextDecoder = struct {
         try self.layer_norm.forward(result, result.*);
         try self.embed_tokens.asLinear(result, result.*);
     }
-
-    pub fn deinit(self: *Self) void {
-        self.embed_tokens.deinit();
-        mlx.arrayFree(self.positional_embedding);
-        for (self.layers) |*layer| {
-            layer.deinit();
-        }
-        self.allocator.free(self.layers);
-        self.layer_norm.deinit();
-        self.allocator.free(self.key);
-    }
 };
 
 pub const Whisper = struct {
     const Self = @This();
-    encoder: AudioEncoder,
-    decoder: TextDecoder,
+    encoder: *AudioEncoder,
+    decoder: *TextDecoder,
     stream: mlx.Stream,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, config: *const WhisperConfig, stream: mlx.Stream) !Self {
-        const encoder = try AudioEncoder.init(allocator, "model", "encoder", config, stream);
-        const decoder = try TextDecoder.init(allocator, "model", "decoder", config, stream);
-        return Self{
+    pub fn init(allocator: std.mem.Allocator, config: *const WhisperConfig, weights_hash: *std.StringHashMap(*mlx.Array), stream: mlx.Stream) !Self {
+        const encoder = try AudioEncoder.init(allocator, "model", "encoder", config, weights_hash, stream);
+        const decoder = try TextDecoder.init(allocator, "model", "decoder", config, weights_hash, stream);
+        return .{
             .encoder = encoder,
             .decoder = decoder,
             .stream = stream,
             .allocator = allocator,
         };
-    }
-
-    pub fn load(self: *Self, weights_map: *const mlx.MapStrArr) !void {
-        try self.encoder.load(weights_map);
-        try self.decoder.load(weights_map);
     }
 
     pub fn encode(self: *Self, result: *mlx.Array, mel: mlx.Array) !void {
@@ -393,7 +366,10 @@ pub const Transcriber = struct {
         const path_config = try std.fmt.bufPrintZ(&buf, "{s}/config.json", .{model_path});
         const config = try loadJson(WhisperConfig, allocator, path_config, true);
         defer config.deinit();
-        var model = try Whisper.init(allocator, &config.value, stream);
+        var weights_hash = std.StringHashMap(*mlx.Array).init(allocator);
+        defer weights_hash.deinit();
+        var model = try Whisper.init(allocator, &config.value, &weights_hash, stream);
+        errdefer model.deinit();
         const pattern = "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+";
         const specials = [_][]const u8{
             "<|endoftext|>",
@@ -410,8 +386,8 @@ pub const Transcriber = struct {
         const path_weight = try std.fmt.bufPrintZ(&buf, "{s}/model.safetensors", .{model_path});
         var safetensors = try mlx.Safetensors.load(path_weight, stream);
         defer safetensors.deinit();
-        try model.load(&safetensors.weights);
-        return Self{
+        try safetensors.unload(&weights_hash);
+        return .{
             .model = model,
             .tokenizer = tokenizer,
             .stream = stream,
@@ -444,9 +420,7 @@ pub const Transcriber = struct {
         const elapsed: f16 = @floatFromInt(std.time.milliTimestamp() - start_time);
         const ntok = new_tok.items.len;
         const tps = @as(f16, @floatFromInt(ntok)) / (elapsed / 1000.0);
-
         std.debug.print("\n{d:.2} tokens-per-second ({d} tokens in {d:.2} ms)\n", .{ tps, ntok, elapsed });
-
         var filtered_tokens = std.ArrayList(u32).init(self.allocator);
         defer filtered_tokens.deinit();
         for (new_tok.items) |token| {
@@ -540,7 +514,7 @@ fn getMel(result: *mlx.Array, audio_raw: []f32, stream: mlx.Stream) !void {
     try mlx.astype(result, audio, mlx.DTYPE.FLOAT16, stream);
 }
 
-fn createSinusoids(result: *mlx.Array, length: c_int, channels: c_int, stream: mlx.Stream) !void {
+fn createSinusoids(result: *mlx.Array, length: c_int, channels: c_int, stream: mlx.Stream) !void { // : same as loaded weight
     var inv_timescales = mlx.arrayNew();
     defer mlx.arrayFree(inv_timescales);
     var scaled_time = mlx.arrayNew();

@@ -96,18 +96,22 @@ pub fn allocJoin(allocator: std.mem.Allocator, parent: []const u8, name: anytype
     return std.fmt.allocPrint(allocator, "{s}.{s}", .{ parent, name });
 }
 
-pub fn comptimeJoin(comptime parent: []const u8, comptime name: anytype) *const [:0]u8 {
-    comptime {
-        if (@TypeOf(name) == @TypeOf(null) or
-            (@typeInfo(@TypeOf(name)) == .Pointer and name.len == 0))
-        {
-            return parent ++ "\x00";
+pub fn allocJoinTuple(allocator: std.mem.Allocator, segments: anytype, separator: []const u8) ![]u8 { // : broken, will fix later
+    var result = std.ArrayList(u8).init(allocator);
+    defer result.deinit();
+    inline for (segments) |segment| {
+        const T = @TypeOf(segment);
+        if (T == @TypeOf(null) or (@typeInfo(@TypeOf(segment)) == .Pointer and segment.len == 0))
+            continue;
+        if (result.items.len > 0)
+            try result.appendSlice(separator);
+        if (@typeInfo(T) == .Int or @typeInfo(T) == .ComptimeInt) {
+            try std.fmt.format(result.writer(), "{d}", .{segment});
+        } else {
+            try std.fmt.format(result.writer(), "{s}", .{segment});
         }
-        if (@typeInfo(@TypeOf(name)) == .Int or @typeInfo(@TypeOf(name)) == .ComptimeInt) {
-            return std.fmt.comptimePrint("{s}.{d}", .{ parent, name });
-        }
-        return std.fmt.comptimePrint("{s}.{s}", .{ parent, name });
     }
+    return result.toOwnedSlice();
 }
 
 pub fn formatDynamic(
@@ -148,7 +152,7 @@ pub fn formatRangeFloat(comptime count: usize) [count][]const u8 {
     inline for (&result, 0..) |*ptr, i| {
         const seconds = @as(f32, @floatFromInt(i)) * 0.02;
         const whole = @as(u32, @intFromFloat(seconds));
-        const frac = @as(u32, @intFromFloat((seconds - @as(f32, @floatFromInt(whole))) * 100.0 + 0.5)); // +0.5 for rounding
+        const frac = @as(u32, @intFromFloat((seconds - @as(f32, @floatFromInt(whole))) * 100.0 + 0.5));
         if (frac < 10) {
             ptr.* = std.fmt.comptimePrint("<|{d}.0{d}|>", .{ whole, frac });
         } else {
