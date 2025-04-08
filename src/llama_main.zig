@@ -50,17 +50,8 @@ pub fn main() !void {
 
 test "Llama-3.2-1B-Instruct-4bit chat" {
     std.debug.print("\n=== LLAMA_MAIN.ZIG ===\n\n", .{});
-    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    // defer {
-    //     const leaked = gpa.deinit();
-    //     if (leaked == .leak) {
-    //         std.debug.print("Memory leaks detected!\n", .{});
-    //     }
-    // }
-    // const allocator = gpa.allocator();
     const allocator = std.testing.allocator;
     const model_name = "Llama-3.2-1B-Instruct-4bit";
-
     const chat_format =
         \\<|begin_of_text|><|start_header_id|>system<|end_header_id|>
         \\

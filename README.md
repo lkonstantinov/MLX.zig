@@ -25,9 +25,9 @@ zig build
 
 This creates the following executables in `zig-out/bin/`:
 - `whisper` - Whisper speech-to-text
+- `llm` - LLM models (Qwen-2.5, Olympic-Coder, ...) for chat/code generation
 - `phi` - Phi-4 text generation
 - `llama` - Llama-3.2 chat
-- `llm` - Unified interface for multiple LLM models
 - `main` - Basic info
 
 ## Speech-to-Text with Whisper-Turbo-Large
@@ -65,7 +65,7 @@ const transcription = try transcriber.transcribe("test.mp3");
 defer allocator.free(transcription);
 ```
 
-## Large Language Models - Qwen-2.5, Olympic-Coder, Phi-4, Llama-3.2, ...
+## Large Language Models - Qwen-2.5, Olympic-Coder, ...
 
 The `llm` executable provides a unified interface to easily switch between different LLM models via a consistent command-line interface.
 

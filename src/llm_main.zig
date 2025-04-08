@@ -170,18 +170,14 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
-
     var model_type: ModelType = .llama;
     var num_tokens: usize = 30;
     var model_name: ?[]const u8 = null;
     var system_prompt: ?[]const u8 = null;
-
     var replacements = std.ArrayList([]const u8).init(allocator);
     defer replacements.deinit();
-
     const process_args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, process_args);
-
     var i: usize = 1;
     while (i < process_args.len) : (i += 1) {
         const arg = process_args[i];
@@ -207,7 +203,6 @@ pub fn main() !void {
             try replacements.append(arg);
         }
     }
-
     if (system_prompt) |prompt| {
         try replacements.insert(0, prompt);
     } else if (replacements.items.len > 0) {
@@ -215,45 +210,35 @@ pub fn main() !void {
             try replacements.insert(0, "You are a helpful assistant.");
         }
     }
-
     var config = try ModelConfig.init(allocator, model_type);
     defer config.deinit();
-
     if (model_name) |name| {
         config.model_name = name;
     }
     config.num_tokens = num_tokens;
-
     if (replacements.items.len > 0) {
         try config.setContent(replacements.items);
     }
-
     try runModel(&config);
 }
 
 fn runModel(config: *ModelConfig) !void {
     std.debug.print("Downloading model: {s}\n", .{config.model_name});
     try download(config.allocator, "mlx-community", config.model_name, config.required_files);
-
     std.debug.print("Initializing tokenizer\n", .{});
     var tokenizer = try Tokenizer.init(config.allocator, config.model_name);
     defer tokenizer.deinit();
-
     std.debug.print("Loading transformer\n", .{});
     try config.loadTransformer();
-
     std.debug.print("Encoding input\n", .{});
     const input_ids = try tokenizer.encodeChat(config.chat_format, config.chat_content);
     defer config.allocator.free(input_ids);
-
     std.debug.print("Starting model generation\n", .{});
     const output_ids = try config.generate(input_ids);
     defer config.allocator.free(output_ids);
-
     std.debug.print("Decoding output\n", .{});
     const output_str = try tokenizer.decode(output_ids);
     defer config.allocator.free(output_str);
-
     std.debug.print("\nInput: {s}\n\nOutput: {s}\n", .{
         if (config.chat_content.len > 0) config.chat_content[config.chat_content.len - 1] else "",
         output_str,
