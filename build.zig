@@ -2,7 +2,85 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
-    const optimize = std.builtin.OptimizeMode.ReleaseFast;
+    const optimize = b.standardOptimizeOption(.{});
+    const deps = try setupDependencies(b, target, optimize);
+    const llm_options = try LlmOptions.fromOptions(b);
+    const llm_exe = b.addExecutable(.{
+        .name = "llm",
+        .root_source_file = b.path("src/llm.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    llm_exe.root_module.addImport("build_options", llm_options.createModule(b));
+    configureExecutable(llm_exe, b, deps);
+    b.installArtifact(llm_exe);
+    const whisper_exe = b.addExecutable(.{
+        .name = "whisper",
+        .root_source_file = b.path("src/whisper.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    configureExecutable(whisper_exe, b, deps);
+    b.installArtifact(whisper_exe);
+    const llm_run = b.addRunArtifact(llm_exe);
+    if (b.args) |args| llm_run.addArgs(args);
+    const run_llm = b.step("run-llm", "Run LLM app");
+    run_llm.dependOn(&llm_run.step);
+    const whisper_run = b.addRunArtifact(whisper_exe);
+    if (b.args) |args| whisper_run.addArgs(args);
+    const run_whisper = b.step("run-whisper", "Run TTS app");
+    run_whisper.dependOn(&whisper_run.step);
+    const run_step = b.step("run", "Run default app"); // : run=run-llm for now
+    run_step.dependOn(&llm_run.step);
+    const test_step = b.step("test", "Run all tests");
+    const main_tests = b.addTest(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    configureExecutable(main_tests, b, deps);
+    const run_main_tests = b.addRunArtifact(main_tests);
+    test_step.dependOn(&run_main_tests.step);
+}
+
+const LlmOptions = struct {
+    config: ?[]const u8,
+    format: ?[]const u8,
+    model_type: ?[]const u8,
+    model_name: ?[]const u8,
+    max: ?usize,
+
+    fn fromOptions(b: *std.Build) !LlmOptions {
+        return LlmOptions{
+            .config = b.option([]const u8, "config", "Config: phi, llama, qwen, olympic"),
+            .model_type = b.option([]const u8, "model-type", "Model-type: phi, llama, qwen"),
+            .model_name = b.option([]const u8, "model-name", "Model-name"),
+            .format = b.option([]const u8, "format", "Chat format"),
+            .max = b.option(usize, "max", "Maximum number of tokens to generate"),
+        };
+    }
+
+    fn createModule(self: LlmOptions, b: *std.Build) *std.Build.Module {
+        const options_pkg = b.addOptions();
+        options_pkg.addOption(?[]const u8, "config", self.config);
+        options_pkg.addOption(?[]const u8, "format", self.format);
+        options_pkg.addOption(?[]const u8, "model_type", self.model_type);
+        options_pkg.addOption(?[]const u8, "model_name", self.model_name);
+        options_pkg.addOption(?usize, "max", self.max);
+
+        return options_pkg.createModule();
+    }
+};
+
+const Dependencies = struct {
+    mlx_c_path: []const u8,
+    mlx_c_build_path: []const u8,
+    mlx_c_lib_path: []const u8,
+    install_step: *std.Build.Step,
+    pcre2_dep: *std.Build.Dependency,
+};
+
+fn setupDependencies(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) !Dependencies {
     const mlx_c_path = b.pathJoin(&.{ b.cache_root.path.?, "mlx-c" });
     const mlx_c_build_path = b.pathJoin(&.{ mlx_c_path, "build" });
     const mlx_c_lib_path = b.pathJoin(&.{ mlx_c_build_path, "libmlxc.a" });
@@ -20,74 +98,6 @@ pub fn build(b: *std.Build) !void {
         make_cmd.step.dependOn(&cmake_cmd.step);
         install_step.dependOn(&make_cmd.step);
     }
-    const pcre2_dep = b.dependency("pcre2", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const whisper_exe = b.addExecutable(.{
-        .name = "whisper",
-        .root_source_file = b.path("src/whisper_main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const llama_exe = b.addExecutable(.{
-        .name = "llama",
-        .root_source_file = b.path("src/llama_main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const phi_exe = b.addExecutable(.{
-        .name = "phi",
-        .root_source_file = b.path("src/phi_main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const llm_exe = b.addExecutable(.{
-        .name = "llm",
-        .root_source_file = b.path("src/llm_main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const main_exe = if (doesFileExist("src/main.zig")) b.addExecutable(.{
-        .name = "main",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    }) else null;
-    configureExecutable(whisper_exe, b, mlx_c_path, mlx_c_build_path, pcre2_dep, install_step);
-    configureExecutable(llama_exe, b, mlx_c_path, mlx_c_build_path, pcre2_dep, install_step);
-    configureExecutable(phi_exe, b, mlx_c_path, mlx_c_build_path, pcre2_dep, install_step);
-    configureExecutable(llm_exe, b, mlx_c_path, mlx_c_build_path, pcre2_dep, install_step);
-    if (main_exe) |exe| {
-        configureExecutable(exe, b, mlx_c_path, mlx_c_build_path, pcre2_dep, install_step);
-    }
-    b.installArtifact(whisper_exe);
-    b.installArtifact(llama_exe);
-    b.installArtifact(phi_exe);
-    b.installArtifact(llm_exe);
-    if (main_exe) |exe| {
-        b.installArtifact(exe);
-    }
-    const whisper_run = b.addRunArtifact(whisper_exe);
-    if (b.args) |args| {
-        whisper_run.addArgs(args);
-    }
-    const run_whisper = b.step("run-whisper", "Run the whisper transcription app");
-    run_whisper.dependOn(&whisper_run.step);
-    const llama_run = b.addRunArtifact(llama_exe);
-    const run_llama = b.step("run-llama", "Run the llama chat app");
-    run_llama.dependOn(&llama_run.step);
-    const phi_run = b.addRunArtifact(phi_exe);
-    const run_phi = b.step("run-phi", "Run the phi cli");
-    run_phi.dependOn(&phi_run.step);
-    const llm_run = b.addRunArtifact(llm_exe);
-    const run_llm = b.step("run-llm", "Run the llm demo");
-    run_llm.dependOn(&llm_run.step);
-    if (main_exe) |exe| {
-        const main_run = b.addRunArtifact(exe);
-        const run_main = b.step("run", "Run the main app");
-        run_main.dependOn(&main_run.step);
-    }
     if (doesFileExist(b.pathJoin(&.{ mlx_c_build_path, "_deps/mlx-build/mlx.metallib" }))) {
         const dest_dir = b.pathJoin(&.{ b.install_path, "lib", "metal" });
         const mkdir_cmd = b.addSystemCommand(&.{ "mkdir", "-p", dest_dir });
@@ -99,71 +109,34 @@ pub fn build(b: *std.Build) !void {
         copy_cmd.step.dependOn(&mkdir_cmd.step);
         b.getInstallStep().dependOn(&copy_cmd.step);
     }
-    const help_step = b.step("help", "Explains how to use the build system");
-    const help_msg = b.addSystemCommand(&[_][]const u8{
-        "echo",
-        \\
-        \\Zig Build System Usage:
-        \\
-        \\  zig build                           - Builds all executables and installs to zig-out/bin
-        \\  zig build run-whisper -- [file]     - Builds and runs whisper with optional audio file
-        \\  zig build run-phi                   - Builds and runs phi cli
-        \\  zig build run-llama                 - Builds and runs llama chat
-        \\  zig build run-llm                   - Builds and runs llm (qwen, olympic, phi, llama)
-        \\  zig build run                       - Builds and runs main.zig (for development/testing)
-        \\
-        \\Exe Usage:
-        \\
-        \\  zig-out/bin/whisper [audio_file]    - Run whisper with optional audio file
-        \\  zig-out/bin/phi [prompt]            - Run phi with optional user prompt
-        \\  zig-out/bin/llama                   - Run llama chat
-        \\  zig-out/bin/main                    - Run main app with build instructions
-        \\  zig-out/bin/llm [options] [input]    - Run llm app (see below)
-        \\
-        \\LLM Usage: llm [options] [input]
-        \\
-        \\Options:
-        \\  --model-type=TYPE       Model type: llama, phi, qwen, olympic (default: llama)
-        \\  --model-name=NAME       Model name to download/use
-        \\  --system-prompt=PROMPT  System prompt for the model
-        \\  --num-tokens=N          Number of tokens to generate
-        \\  --help                  Show this help
-        \\
-        \\Examples:
-        \\  llm --model-type=phi --system-prompt="You are a helpful assistant" "How should I explain the Internet?"
-        \\  llm --model-type=olympic "Write a python function to check if a number is prime"
-        \\
-    });
-    help_step.dependOn(&help_msg.step);
-    const test_step = b.step("test", "Run all tests");
-    const main_tests = b.addTest(.{
-        .root_source_file = b.path("src/main.zig"),
+    const pcre2_dep = b.dependency("pcre2", .{
         .target = target,
         .optimize = optimize,
     });
-    configureExecutable(main_tests, b, mlx_c_path, mlx_c_build_path, pcre2_dep, install_step);
-    const run_main_tests = b.addRunArtifact(main_tests);
-    test_step.dependOn(&run_main_tests.step);
+    return Dependencies{
+        .mlx_c_path = mlx_c_path,
+        .mlx_c_build_path = mlx_c_build_path,
+        .mlx_c_lib_path = mlx_c_lib_path,
+        .install_step = install_step,
+        .pcre2_dep = pcre2_dep,
+    };
 }
 
 fn configureExecutable(
     exe: *std.Build.Step.Compile,
     b: *std.Build,
-    mlx_c_path: []const u8,
-    mlx_c_build_path: []const u8,
-    pcre2_dep: *std.Build.Dependency,
-    install_step: *std.Build.Step,
+    deps: Dependencies,
 ) void {
-    exe.step.dependOn(install_step);
-    exe.addIncludePath(.{ .cwd_relative = mlx_c_path });
-    exe.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ mlx_c_build_path, "libmlxc.a" }) });
-    exe.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ mlx_c_build_path, "_deps/mlx-build/libmlx.a" }) });
+    exe.step.dependOn(deps.install_step);
+    exe.addIncludePath(.{ .cwd_relative = deps.mlx_c_path });
+    exe.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ deps.mlx_c_build_path, "libmlxc.a" }) });
+    exe.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ deps.mlx_c_build_path, "_deps/mlx-build/libmlx.a" }) });
     exe.linkFramework("Metal");
     exe.linkFramework("Foundation");
     exe.linkFramework("QuartzCore");
     exe.linkFramework("Accelerate");
     exe.linkLibCpp();
-    exe.linkLibrary(pcre2_dep.artifact("pcre2-8"));
+    exe.linkLibrary(deps.pcre2_dep.artifact("pcre2-8"));
 }
 
 fn doesFileExist(path: []const u8) bool {

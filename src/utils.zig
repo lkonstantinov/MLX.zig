@@ -4,6 +4,59 @@
 
 const std = @import("std");
 
+pub fn downloadModel(allocator_: std.mem.Allocator, repo_name_: []const u8, model_name_: []const u8) !void {
+    const getModelFiles = struct {
+        fn getModelFiles(allocator: std.mem.Allocator, repo_name: []const u8, model_name: []const u8) !?[]const []const u8 {
+            const index_path = try std.fmt.allocPrint(allocator, "{s}/model.safetensors.index.json", .{model_name});
+            defer allocator.free(index_path);
+            if (!fileExists(index_path)) {
+                download(allocator, repo_name, model_name, &[_][]const u8{"model.safetensors.index.json"}) catch return null;
+                if (!fileExists(index_path)) return null;
+            }
+            const index_content = std.fs.cwd().readFileAlloc(allocator, index_path, 10 * 1024 * 1024) catch return null;
+            defer allocator.free(index_content);
+            var parsed = std.json.parseFromSlice(std.json.Value, allocator, index_content, .{}) catch return null;
+            defer parsed.deinit();
+            const weight_map = parsed.value.object.get("weight_map") orelse return null;
+            if (weight_map != .object or weight_map.object.count() == 0) return null;
+            var iter = weight_map.object.iterator();
+            const first_entry = iter.next() orelse return null;
+            if (first_entry.value_ptr.* != .string) return null;
+            const pattern = first_entry.value_ptr.*.string;
+            var files = std.ArrayList([]const u8).init(allocator);
+            errdefer {
+                for (files.items) |file| allocator.free(file);
+                files.deinit();
+            }
+            try files.append(try allocator.dupe(u8, "config.json"));
+            try files.append(try allocator.dupe(u8, "tokenizer.json"));
+            if (std.mem.indexOf(u8, pattern, "-of-")) |idx| {
+                const total_part = pattern[idx + 4 ..];
+                const dash_idx = std.mem.indexOf(u8, total_part, "-") orelse
+                    std.mem.indexOf(u8, total_part, ".") orelse return null;
+                const count_str = total_part[0..dash_idx];
+                const count = std.fmt.parseInt(usize, count_str, 10) catch return null;
+                const base = pattern[0..std.mem.indexOf(u8, pattern, "-00").?];
+                const ext = pattern[std.mem.lastIndexOf(u8, pattern, ".").?..];
+                for (1..count + 1) |i| {
+                    const filename = try std.fmt.allocPrint(allocator, "{s}-{:0>5}-of-{:0>5}{s}", .{ base, i, count, ext });
+                    try files.append(filename);
+                }
+            } else {
+                try files.append(try allocator.dupe(u8, pattern));
+            }
+            const result = try files.toOwnedSlice();
+            return result;
+        }
+    }.getModelFiles;
+    const custom_files = try getModelFiles(allocator_, repo_name_, model_name_);
+    defer if (custom_files) |files| {
+        for (files) |file| allocator_.free(file);
+        allocator_.free(files);
+    };
+    return download(allocator_, repo_name_, model_name_, custom_files);
+}
+
 pub fn download(allocator: std.mem.Allocator, repo_name: []const u8, model_name: []const u8, file_names: ?[]const []const u8) !void {
     const mkdir = struct {
         fn mkdir(dir: []const u8) !void {
@@ -18,22 +71,13 @@ pub fn download(allocator: std.mem.Allocator, repo_name: []const u8, model_name:
             std.debug.print("Directory '{s}' created successfully.\n", .{dir});
         }
     }.mkdir;
-    const fileExists = struct {
-        fn fileExists(path: []const u8) bool {
-            std.fs.cwd().access(path, .{}) catch return false;
-            return true;
-        }
-    }.fileExists;
     try mkdir(model_name);
-
     const default_filenames = [_][]const u8{
         "model.safetensors",
         "config.json",
         "tokenizer.json",
     };
-
     const filenames = if (file_names) |f| f else &default_filenames;
-
     var args = std.ArrayList([]const u8).init(allocator);
     defer args.deinit();
     try args.append("curl");
@@ -84,36 +128,6 @@ pub fn download(allocator: std.mem.Allocator, repo_name: []const u8, model_name:
     }
 }
 
-pub fn allocJoin(allocator: std.mem.Allocator, parent: []const u8, name: anytype) ![]u8 {
-    if (@TypeOf(name) == @TypeOf(null) or
-        (@typeInfo(@TypeOf(name)) == .Pointer and name.len == 0))
-    {
-        return allocator.dupe(u8, parent);
-    }
-    if (@typeInfo(@TypeOf(name)) == .Int or @typeInfo(@TypeOf(name)) == .ComptimeInt) {
-        return std.fmt.allocPrint(allocator, "{s}.{d}", .{ parent, name });
-    }
-    return std.fmt.allocPrint(allocator, "{s}.{s}", .{ parent, name });
-}
-
-pub fn allocJoinTuple(allocator: std.mem.Allocator, segments: anytype, separator: []const u8) ![]u8 { // : broken, will fix later
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
-    inline for (segments) |segment| {
-        const T = @TypeOf(segment);
-        if (T == @TypeOf(null) or (@typeInfo(@TypeOf(segment)) == .Pointer and segment.len == 0))
-            continue;
-        if (result.items.len > 0)
-            try result.appendSlice(separator);
-        if (@typeInfo(T) == .Int or @typeInfo(T) == .ComptimeInt) {
-            try std.fmt.format(result.writer(), "{d}", .{segment});
-        } else {
-            try std.fmt.format(result.writer(), "{s}", .{segment});
-        }
-    }
-    return result.toOwnedSlice();
-}
-
 pub fn formatDynamic(
     allocator: std.mem.Allocator,
     chat_fmt: []const u8,
@@ -162,7 +176,11 @@ pub fn formatRangeFloat(comptime count: usize) [count][]const u8 {
     return result;
 }
 
-pub fn loadAudio(alloc: std.mem.Allocator, file_path: []const u8) ![]f32 {
+pub fn loadAudio(allocator: std.mem.Allocator, audio_file: []const u8) ![]f32 {
+    const file_path = try std.fs.cwd().realpathAlloc(allocator, audio_file);
+    defer allocator.free(file_path);
+    std.debug.print("\nAUDIO: {s}\n", .{file_path});
+    std.fs.cwd().access(file_path, .{}) catch return error.AudioFileNotFound;
     const buffer_size = 16384;
     const args = [_][]const u8{
         "ffmpeg",
@@ -183,11 +201,11 @@ pub fn loadAudio(alloc: std.mem.Allocator, file_path: []const u8) ![]f32 {
         "error",
         "-",
     };
-    var process = std.process.Child.init(&args, alloc);
+    var process = std.process.Child.init(&args, allocator);
     process.stdout_behavior = .Pipe;
     process.stderr_behavior = .Pipe;
     try process.spawn();
-    var float_samples = std.ArrayList(f32).init(alloc);
+    var float_samples = std.ArrayList(f32).init(allocator);
     defer float_samples.deinit();
     try float_samples.ensureTotalCapacity(16000 * 10);
     const stdout = process.stdout.?.reader();
@@ -213,7 +231,7 @@ pub fn loadAudio(alloc: std.mem.Allocator, file_path: []const u8) ![]f32 {
     const term = try process.wait();
     if (term != .Exited or term.Exited != 0) {
         const stderr = process.stderr.?.reader();
-        var error_msg = std.ArrayList(u8).init(alloc);
+        var error_msg = std.ArrayList(u8).init(allocator);
         defer error_msg.deinit();
         try stderr.readAllArrayList(&error_msg, 4096);
         std.log.err("Failed to load audio: {s}", .{error_msg.items});
@@ -279,4 +297,25 @@ pub fn loadJson(comptime T: type, allocator: std.mem.Allocator, filename: []cons
         try printVals(T, parsed.value, allocator);
     }
     return parsed;
+}
+
+pub fn loadConfigJson(comptime T: type, allocator: std.mem.Allocator, model_path: []const u8, verbose: bool) !std.json.Parsed(T) {
+    var buf: [1024]u8 = undefined;
+    const path_config = try std.fmt.bufPrintZ(&buf, "{s}/config.json", .{model_path});
+    var parsed = try loadJson(T, allocator, path_config, verbose);
+    if (@hasField(T, "eos_token_id")) {
+        if (@TypeOf(parsed.value.eos_token_id) == u32) {
+            var eos_ids = try allocator.alloc(u32, 1);
+            eos_ids[0] = parsed.value.eos_token_id;
+            parsed.value.eos_token_ids = eos_ids;
+        } else {
+            parsed.value.eos_token_ids = try allocator.dupe(u32, parsed.value.eos_token_id);
+        }
+    }
+    return parsed;
+}
+
+fn fileExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
 }

@@ -11,7 +11,7 @@ const formatRangeFloat = @import("utils.zig").formatRangeFloat;
 pub const Tokenizer = struct {
     const Self = @This();
     allocator: std.mem.Allocator,
-    pattern_regex: Regex,
+    pattern_regex: ?Regex,
     special_regex: ?Regex,
     vocab: std.StringHashMap(u32),
     id_to_token: std.AutoHashMap(u32, []const u8),
@@ -24,9 +24,19 @@ pub const Tokenizer = struct {
         defer allocator.free(json_content);
         var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_content, .{});
         defer parsed.deinit();
-        const pattern = parsed.value.object.get("pre_tokenizer").?.object.get("pretokenizers").?.array.items[0].object.get("pattern").?.object.get("Regex").?.string;
-        var pattern_regex = try Regex.init(pattern);
-        errdefer pattern_regex.deinit();
+        var pattern_regex: ?Regex = null;
+        const pre_tokenizer = parsed.value.object.get("pre_tokenizer");
+        if (pre_tokenizer != null) {
+            const pretokenizers = pre_tokenizer.?.object.get("pretokenizers");
+            if (pretokenizers != null and pretokenizers.?.array.items.len > 0) {
+                const pattern_obj = pretokenizers.?.array.items[0].object.get("pattern");
+                if (pattern_obj != null and pattern_obj.?.object.get("Regex") != null) {
+                    const pattern = pattern_obj.?.object.get("Regex").?.string;
+                    pattern_regex = try Regex.init(pattern);
+                }
+            }
+        }
+
         var vocab = std.StringHashMap(u32).init(allocator);
         errdefer vocab.deinit();
         var id_to_token = std.AutoHashMap(u32, []const u8).init(allocator);
@@ -73,8 +83,12 @@ pub const Tokenizer = struct {
             const content = token.object.get("content") orelse continue;
             const id = token.object.get("id") orelse continue;
             if (content != .string or id != .integer) continue;
-            const token_str = content.string;
             const token_id = @as(u32, @intCast(id.integer));
+            const token_str = content.string;
+            if (vocab.get(token_str)) |old_id| {
+                if (old_id != token_id) std.debug.print("Duplicate: {s} {d} -> {d}", .{ token_str, old_id, token_id });
+                continue;
+            }
             const token_copy = try allocator.dupe(u8, token_str);
             try vocab.put(token_copy, token_id);
             try id_to_token.put(token_id, token_copy);
@@ -153,7 +167,9 @@ pub const Tokenizer = struct {
         if (self.special_regex) |*regex| {
             regex.deinit();
         }
-        self.pattern_regex.deinit();
+        if (self.pattern_regex) |*regex| {
+            regex.deinit();
+        }
         self.allocator.free(self.specials);
     }
 
@@ -250,9 +266,13 @@ pub const Tokenizer = struct {
             }
             result.deinit();
         }
+        if (self.pattern_regex == null) {
+            try result.append(try self.allocator.dupe(u8, text));
+            return result;
+        }
         var start: usize = 0;
         while (start < text.len) {
-            const match_result = try self.pattern_regex.match(text, start);
+            const match_result = try self.pattern_regex.?.match(text, start);
             if (match_result == null) {
                 if (start < text.len) {
                     const remaining = try self.allocator.dupe(u8, text[start..]);
@@ -319,6 +339,7 @@ pub const Tokenizer = struct {
     }
 
     pub fn encode(self: *Self, text: []const u8) ![]const u32 {
+        std.debug.print("\nInput to encode: {s}\n", .{text});
         var result = std.ArrayList(u32).init(self.allocator);
         errdefer result.deinit();
         var parts = try self.splitWithSpecials(text);
@@ -363,12 +384,12 @@ pub const Tokenizer = struct {
     }
 
     pub fn encodeChat(self: *Self, chat_format: ?[]const u8, replacements: []const []const u8) ![]const u32 {
+        std.debug.print("\nReplacements #: {d}\nChat format: ", .{replacements.len});
         if (chat_format == null) {
-            if (replacements.len != 1) {
-                return error.ReplacementCountMismatch;
-            }
+            std.debug.print("null\n", .{});
             return self.encode(replacements[0]);
         }
+        std.debug.print("{s}\n", .{chat_format.?});
         const format = chat_format.?;
         const formatted = try formatDynamic(self.allocator, format, replacements);
         defer self.allocator.free(formatted);
