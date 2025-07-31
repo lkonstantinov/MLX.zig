@@ -58,8 +58,8 @@ pub const log10 = defineUnaryOp("mlx_log10");
 pub fn item(dest: anytype, arr: Array) MLXError!void {
     const T = @TypeOf(dest);
     const info = @typeInfo(T);
-    if (info != .Pointer) @compileError("Expected pointer, got " ++ @typeName(T));
-    const child = info.Pointer.child;
+    if (info != .pointer) @compileError("Expected pointer, got " ++ @typeName(T));
+    const child = info.pointer.child;
     const c_func_name = switch (child) {
         u32, c_uint => "mlx_array_item_uint32",
         i32, c_int => "mlx_array_item_int32",
@@ -86,7 +86,7 @@ pub fn astype(result: *Array, x: anytype, dtype: C.mlx_dtype, stream: Stream) ML
 /// ============================================================================
 /// Array Operations
 /// ============================================================================
-pub const maxAll = defineReduceAllOp("mlx_max_all");
+pub const maxAll = defineReduceAllOp("mlx_max");
 pub const minAll = defineReduceAllOp("mlx_min_all");
 pub const max = defineReduceAxesOp("mlx_max");
 pub const min = defineReduceAxesOp("mlx_min");
@@ -111,7 +111,7 @@ pub fn arrayNewData(data: *const anyopaque, shape_arg: anytype, dtype: C.mlx_dty
     var shape: [32]c_int = undefined;
     var len: usize = 0;
     const T = @TypeOf(shape_arg);
-    const fields = @typeInfo(T).Struct.fields;
+    const fields = @typeInfo(T).@"struct".fields;
     inline for (fields, 0..) |field, idx| {
         shape[idx] = @intCast(@field(shape_arg, field.name));
         len = idx + 1;
@@ -125,7 +125,7 @@ pub fn arraySetData(arr: *Array, data: *const anyopaque, shape_arg: anytype, dty
     var shape: [32]c_int = undefined;
     var len: usize = 0;
     const T = @TypeOf(shape_arg);
-    const fields = @typeInfo(T).Struct.fields;
+    const fields = @typeInfo(T).@"struct".fields;
     inline for (fields, 0..) |field, idx| {
         shape[idx] = @intCast(@field(shape_arg, field.name));
         len = idx + 1;
@@ -146,7 +146,7 @@ pub fn where(result: *Array, cond: Array, x: anytype, y: anytype, stream: Stream
 pub fn take(result: *Array, x: Array, indices: anytype, axis: c_int, stream: Stream) MLXError!void {
     const indices_conv = arrayConverter(indices);
     defer indices_conv.deinit();
-    try mlxOpWithCall(C.mlx_take, .{ result, x, indices_conv.arr, axis, stream });
+    try mlxOpWithCall(C.mlx_take_axis, .{ result, x, indices_conv.arr, axis, stream });
 }
 
 pub fn pad(result: *Array, x: Array, axes: []const c_int, low_pad: []const c_int, high_pad: []const c_int, pad_value: anytype, pad_mode: [*:0]const u8, stream: Stream) MLXError!void {
@@ -163,16 +163,16 @@ pub fn asStrided(result: *Array, x: Array, shape: []const c_int, strides: []cons
     try mlxOpWithCall(C.mlx_as_strided, .{ result, x, shape.ptr, shape.len, strides.ptr, strides.len, offset, stream });
 }
 
-pub fn expand_dims(result: *Array, x: Array, axes: []const c_int, stream: Stream) MLXError!void {
-    try mlxOpWithCall(C.mlx_expand_dims, .{ result, x, axes.ptr, axes.len, stream });
+pub fn expand_dims_axes(result: *Array, x: Array, axes: []const c_int, stream: Stream) MLXError!void {
+    try mlxOpWithCall(C.mlx_expand_dims_axes, .{ result, x, axes.ptr, axes.len, stream });
 }
 
 pub fn reshape(result: *Array, x: Array, shape: []const c_int, stream: Stream) MLXError!void {
     try mlxOpWithCall(C.mlx_reshape, .{ result, x, shape.ptr, shape.len, stream });
 }
 
-pub fn softmax(result: *Array, x: Array, axes: []const c_int, precise: bool, stream: Stream) MLXError!void {
-    try mlxOpWithCall(C.mlx_softmax, .{ result, x, axes.ptr, axes.len, precise, stream });
+pub fn softmax_axes(result: *Array, x: Array, axes: []const c_int, precise: bool, stream: Stream) MLXError!void {
+    try mlxOpWithCall(C.mlx_softmax_axes, .{ result, x, axes.ptr, axes.len, precise, stream });
 }
 
 pub fn ones(result: *Array, shape: []const c_int, dtype: C.mlx_dtype, stream: Stream) MLXError!void {
@@ -183,8 +183,8 @@ pub fn zeros(result: *Array, shape: []const c_int, dtype: C.mlx_dtype, stream: S
     try mlxOpWithCall(C.mlx_zeros, .{ result, shape.ptr, shape.len, dtype, stream });
 }
 
-pub fn argmax(result: *Array, x: Array, axis: c_int, keepdims: bool, stream: Stream) MLXError!void {
-    try mlxOpWithCall(C.mlx_argmax, .{ result, x, axis, keepdims, stream });
+pub fn argmax_axis(result: *Array, x: Array, axis: c_int, keepdims: bool, stream: Stream) MLXError!void {
+    try mlxOpWithCall(C.mlx_argmax_axis, .{ result, x, axis, keepdims, stream });
 }
 
 pub fn tril(result: *Array, x: Array, offset: c_int, stream: Stream) MLXError!void {
@@ -219,7 +219,7 @@ pub fn arrayFree(arr: Array) void {
 /// Vector Operations
 /// ============================================================================
 pub fn einsum(result: *Array, arrays: anytype, pattern: [*:0]const u8, stream: Stream) MLXError!void {
-    const fields = @typeInfo(@TypeOf(arrays)).Struct.fields;
+    const fields = @typeInfo(@TypeOf(arrays)).@"struct".fields;
     var array_data: [fields.len]Array = undefined;
     inline for (fields, 0..) |field, i| array_data[i] = @field(arrays, field.name);
     const operands = C.mlx_vector_array_new_data(&array_data[0], array_data.len);
@@ -227,19 +227,19 @@ pub fn einsum(result: *Array, arrays: anytype, pattern: [*:0]const u8, stream: S
     try mlxOp(C.mlx_einsum(result, pattern, operands, stream));
 }
 
-pub fn concatenate(result: *Array, arrays: anytype, axis: c_int, stream: Stream) MLXError!void {
-    const fields = @typeInfo(@TypeOf(arrays)).Struct.fields;
+pub fn concatenate_axis(result: *Array, arrays: anytype, axis: c_int, stream: Stream) MLXError!void {
+    const fields = @typeInfo(@TypeOf(arrays)).@"struct".fields;
     var array_data: [fields.len]Array = undefined;
     inline for (fields, 0..) |field, i| array_data[i] = @field(arrays, field.name);
     const vector_arrays = C.mlx_vector_array_new_data(&array_data[0], array_data.len);
     defer _ = C.mlx_vector_array_free(vector_arrays);
-    try mlxOp(C.mlx_concatenate(result, vector_arrays, axis, stream));
+    try mlxOp(C.mlx_concatenate_axis(result, vector_arrays, axis, stream));
 }
 
-pub fn split(outputs: []const *Array, a: Array, indices: []const c_int, axis: c_int, stream: Stream) MLXError!void {
+pub fn split_sections(outputs: []const *Array, a: Array, indices: []const c_int, axis: c_int, stream: Stream) MLXError!void {
     var results = C.mlx_vector_array_new();
     defer _ = C.mlx_vector_array_free(results);
-    try mlxOp(C.mlx_split(&results, a, indices.ptr, indices.len, axis, stream));
+    try mlxOp(C.mlx_split_sections(&results, a, indices.ptr, indices.len, axis, stream));
     for (outputs, 0..) |out_ptr, i| {
         try mlxOp(C.mlx_vector_array_get(out_ptr, results, i));
     }
@@ -248,7 +248,7 @@ pub fn split(outputs: []const *Array, a: Array, indices: []const c_int, axis: c_
 pub fn splitEqualParts(outputs: []const *Array, a: Array, num_splits: c_int, axis: c_int, stream: Stream) MLXError!void {
     var results = C.mlx_vector_array_new();
     defer _ = C.mlx_vector_array_free(results);
-    try mlxOp(C.mlx_split_equal_parts(&results, a, num_splits, axis, stream));
+    try mlxOp(C.mlx_split(&results, a, num_splits, axis, stream));
     for (outputs, 0..) |out_ptr, i| {
         try mlxOp(C.mlx_vector_array_get(out_ptr, results, i));
     }
@@ -284,9 +284,14 @@ pub fn fastLayerNorm(result: *Array, x: anytype, weight: anytype, bias: anytype,
 }
 
 pub fn fastScaledDotProductAttention(result: *Array, queries: Array, keys: Array, values: Array, scale: f32, mask: ?Array, stream: Stream) MLXError!void {
-    const memory_threshold = C.mlx_optional_int{ .has_value = false, .value = 0 };
-    const mask_ptr = if (mask) |m| m else C.mlx_array_empty;
-    try mlxOp(C.mlx_fast_scaled_dot_product_attention(result, queries, keys, values, scale, mask_ptr, memory_threshold, stream));
+    // const memory_threshold = C.mlx_optional_int{ .has_value = false, .value = 0 };
+
+    // const mask_ptr = if (mask) |m| m else C.mlx_array_empty;
+
+    const vector_mask: VectorArray = if (mask) |m| C.mlx_vector_array_new_value(m) else C.mlx_vector_array_new();
+    defer _ = C.mlx_vector_array_free(vector_mask);
+
+    try mlxOp(C.mlx_fast_scaled_dot_product_attention(result, queries, keys, values, scale, "", vector_mask, stream));
 }
 
 /// ============================================================================
@@ -303,13 +308,20 @@ pub const defaultGpuStreamNew = C.mlx_default_gpu_stream_new;
 /// File Operations
 /// ============================================================================
 pub fn loadSafetensors(weights_hash: *std.StringHashMap(*Array), path_safetensors: [:0]const u8, stream: Stream) MLXError!void {
-    const file = C.fopen(path_safetensors.ptr, "rb") orelse return MLXError.FileNotFound;
-    defer _ = C.fclose(file);
+    // const file = C.fopen(path_safetensors.ptr, "rb") orelse return MLXError.FileNotFound;
+    // defer _ = C.fclose(file);
+
     var weights = C.mlx_map_string_to_array_new();
     defer _ = C.mlx_map_string_to_array_free(weights);
     var meta = C.mlx_map_string_to_string_new();
     defer _ = C.mlx_map_string_to_string_free(meta);
-    if (C.mlx_load_safetensors_file(&weights, &meta, file, stream) != 0) return MLXError.LoadWeightsFailed;
+
+    std.debug.print("Loading safetensors from '{s}'...\n", .{path_safetensors.ptr});
+    const result = C.mlx_load_safetensors(&weights, &meta, path_safetensors.ptr, stream);
+    std.debug.print("Result of mlx_load_safetensors: {d}\n", .{result});
+
+    if (result != 0) return MLXError.LoadWeightsFailed;
+    std.debug.print("Safetensors loaded from '{s}'\n", .{path_safetensors});
 
     const iter = C.mlx_map_string_to_array_iterator_new(weights);
     defer _ = C.mlx_map_string_to_array_iterator_free(iter);
@@ -343,24 +355,21 @@ pub fn loadModelSafetensors(weights_hash: *std.StringHashMap(*Array), path_dir: 
 pub const Safetensors = struct {
     const Self = @This();
     const MAX_PATH_LEN = 1024;
-    file: ?*C.FILE,
+    // file: ?*C.FILE,
     weights: MapStrArr,
     stream: Stream,
 
     pub fn load(path_safetensors: [:0]const u8, stream: Stream) MLXError!Self {
-        const file = C.fopen(path_safetensors.ptr, "rb") orelse return MLXError.FileNotFound;
         var weights = C.mlx_map_string_to_array_new();
         errdefer {
             _ = C.mlx_map_string_to_array_free(weights);
-            _ = C.fclose(file);
         }
         var meta = C.mlx_map_string_to_string_new();
         defer _ = C.mlx_map_string_to_string_free(meta);
-        if (C.mlx_load_safetensors_file(&weights, &meta, file, stream) != 0) {
+        if (C.mlx_load_safetensors(&weights, &meta, path_safetensors.ptr, stream) != 0) {
             return MLXError.LoadWeightsFailed;
         }
         return Self{
-            .file = file,
             .weights = weights,
             .stream = stream,
         };
@@ -384,10 +393,6 @@ pub const Safetensors = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        if (self.file) |file| {
-            _ = C.fclose(file);
-            self.file = null;
-        }
         _ = C.mlx_map_string_to_array_free(self.weights);
     }
 };
@@ -450,9 +455,9 @@ pub const Module = struct {
 
     pub fn allocJoin(self: *Self, parent: []const u8, name: anytype) ![]const u8 {
         const owned_key = if (@TypeOf(name) == @TypeOf(null) or
-            (@typeInfo(@TypeOf(name)) == .Pointer and name.len == 0))
+            (@typeInfo(@TypeOf(name)) == .pointer and name.len == 0))
             try self.allocator.dupe(u8, parent)
-        else if (@typeInfo(@TypeOf(name)) == .Int or @typeInfo(@TypeOf(name)) == .ComptimeInt)
+        else if (@typeInfo(@TypeOf(name)) == .int or @typeInfo(@TypeOf(name)) == .comptime_int)
             try std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ parent, name })
         else
             try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ parent, name });
@@ -891,7 +896,11 @@ pub fn Transformer(comptime ModelType: type, comptime ConfigType: type) type {
             const mlx_dtype = if (std.mem.eql(u8, "bfloat16", model_config.value.torch_dtype)) BFLOAT16 else FLOAT16;
             var mlx_config = try MLXConfig.init(allocator, mlx_dtype);
             const model = try ModelType.init(model_config.value, &mlx_config);
-            try loadModelSafetensors(&mlx_config.weights_hash, model_path, mlx_config.stream);
+
+            // mlx now requires that safetensor loading is performed on a CPU stream
+            const cpu_stream = C.mlx_default_cpu_stream_new();
+            defer streamFree(cpu_stream);
+            try loadModelSafetensors(&mlx_config.weights_hash, model_path, cpu_stream);
             return .{
                 .mlx_config = mlx_config,
                 .model = model,
@@ -926,7 +935,7 @@ pub fn Transformer(comptime ModelType: type, comptime ConfigType: type) type {
                 try createCausalMask(&mask, arrayDim(toks, 1), cache.offset, self.mlx_config.dtype, self.mlx_config.stream);
                 try self.model.forward(&logits, toks, mask, &cache);
                 try take(&logits, logits, int(-1), 1, self.mlx_config.stream);
-                try argmax(&logits, logits, 1, false, self.mlx_config.stream);
+                try argmax_axis(&logits, logits, 1, false, self.mlx_config.stream);
                 try item(&output_tokens[i], logits);
                 try arraySetData(&toks, &output_tokens[i], .{ 1, 1 }, UINT32);
                 std.debug.print("Generated token {d}/{d}: {d}\n", .{ i + 1, num_tokens, output_tokens[i] });
@@ -1009,11 +1018,11 @@ pub const KVCache = struct {
             const k_concat = [_]Array{ self.k, k.* };
             const k_vec = C.mlx_vector_array_new_data(&k_concat[0], 2);
             defer _ = C.mlx_vector_array_free(k_vec);
-            try mlxOp(C.mlx_concatenate(k, k_vec, self.axis, stream));
+            try mlxOp(C.mlx_concatenate_axis(k, k_vec, self.axis, stream));
             const v_concat = [_]Array{ self.v, v.* };
             const v_vec = C.mlx_vector_array_new_data(&v_concat[0], 2);
             defer _ = C.mlx_vector_array_free(v_vec);
-            try mlxOp(C.mlx_concatenate(v, v_vec, self.axis, stream));
+            try mlxOp(C.mlx_concatenate_axis(v, v_vec, self.axis, stream));
         }
         try arraySet(&self.k, k.*);
         try arraySet(&self.v, v.*);
@@ -1275,7 +1284,7 @@ pub fn rEpeat(result: *Array, x: Array, comptime pattern: []const u8, dim_values
         var i: c_int = 0;
         while (tokens.next()) |token| : (i += 1) if (token[0] == '(') break :blk i;
     };
-    try mlxOpWithLog(C.mlx_repeat(result, x, n_repeat, axis, stream), "rEpeat");
+    try mlxOpWithLog(C.mlx_repeat_axis(result, x, n_repeat, axis, stream), "rEpeat");
 }
 
 pub fn rEshap(result: *Array, x: Array, comptime pattern: []const u8, dim_values: anytype, stream: Stream) !void {
@@ -1286,13 +1295,13 @@ pub fn rEshap(result: *Array, x: Array, comptime pattern: []const u8, dim_values
         const is_lt = popen < arrow;
         const axis_start = a1: {
             const side = if (is_lt) pattern[0..popen] else pattern[arrow + 2 .. popen];
-            var toks_1 = std.mem.tokenize(u8, side, " ");
+            var toks_1 = std.mem.tokenizeScalar(u8, side, ' ');
             var i = 0;
             while (toks_1.next()) |_| i += 1;
             break :a1 i;
         };
         var shape: [16][]const u8 = undefined;
-        var toks_2 = std.mem.tokenize(u8, pattern[popen + 1 .. pclos], " ");
+        var toks_2 = std.mem.tokenizeScalar(u8, pattern[popen + 1 .. pclos], ' ');
         var i: usize = 0;
         while (toks_2.next()) |tok| : (i += 1) {
             shape[i] = tok;

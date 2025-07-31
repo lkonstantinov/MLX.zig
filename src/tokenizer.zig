@@ -121,7 +121,7 @@ pub const Tokenizer = struct {
         var line_buf: [1024]u8 = undefined;
         while (try in_stream.readUntilDelimiterOrEof(&line_buf, '\n')) |line| {
             if (line.len == 0) continue;
-            var iter = std.mem.tokenize(u8, line, " ");
+            var iter = std.mem.tokenizeScalar(u8, line, ' ');
             const token_b64 = iter.next() orelse continue;
             const rank_str = iter.next() orelse continue;
             if (std.mem.eql(u8, token_b64, "=")) {

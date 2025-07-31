@@ -252,7 +252,7 @@ pub fn loadJson(comptime T: type, allocator: std.mem.Allocator, filename: []cons
     }.printParsedValue;
     const printDiff = struct {
         fn printFieldDifferences(comptime T_: type, allocator_: std.mem.Allocator, json_string: []const u8) !void {
-            const struct_info = @typeInfo(T_).Struct;
+            const struct_info = @typeInfo(T_).@"struct";
             var generic = try std.json.parseFromSlice(std.json.Value, allocator_, json_string, .{});
             defer generic.deinit();
             if (generic.value != .object) return;

@@ -112,7 +112,7 @@ const ChatConfig = struct {
 
 const ConfigMap = std.StaticStringMap(ChatConfig).initComptime(.{
     .{
-        "qwq", .{
+        "qwq", @as(ChatConfig, .{
             .model_type = "qwen",
             .model_name = "QwQ-32B-3bit",
             .chat_format =
@@ -123,10 +123,10 @@ const ConfigMap = std.StaticStringMap(ChatConfig).initComptime(.{
             \\
             ,
             .chat_inputs = &[_][]const u8{"Write a python program to calculate the 10th fibonacci number"},
-        },
+        }),
     },
     .{
-        "r1", .{
+        "r1", @as(ChatConfig, .{
             .model_type = "qwen",
             .model_name = "DeepSeek-R1-Distill-Qwen-32B-4bit",
             .chat_format =
@@ -137,10 +137,10 @@ const ConfigMap = std.StaticStringMap(ChatConfig).initComptime(.{
             \\
             ,
             .chat_inputs = &[_][]const u8{"Write a python program to calculate the 10th fibonacci number"},
-        },
+        }),
     },
     .{
-        "r1-math", .{
+        "r1-math", @as(ChatConfig, .{
             .model_type = "qwen",
             .model_name = "DeepSeek-R1-Distill-Qwen-1.5B-4bit",
             .chat_format =
@@ -151,10 +151,10 @@ const ConfigMap = std.StaticStringMap(ChatConfig).initComptime(.{
             \\
             ,
             .chat_inputs = &[_][]const u8{"Write a python program to calculate the 10th fibonacci number"},
-        },
+        }),
     },
     .{
-        "llama", .{
+        "llama", @as(ChatConfig, .{
             .model_type = "llama",
             .model_name = "Llama-3.2-1B-Instruct-4bit",
             .chat_format =
@@ -169,10 +169,10 @@ const ConfigMap = std.StaticStringMap(ChatConfig).initComptime(.{
             \\
             ,
             .chat_inputs = &.{"How to get length of ArrayList in Zig?"},
-        },
+        }),
     },
     .{
-        "phi", .{
+        "phi", @as(ChatConfig, .{
             .model_type = "phi",
             .model_name = "phi-4-2bit",
             .chat_format =
@@ -184,10 +184,10 @@ const ConfigMap = std.StaticStringMap(ChatConfig).initComptime(.{
             \\
             ,
             .chat_inputs = &[_][]const u8{"How should I explain the Internet?"},
-        },
+        }),
     },
     .{
-        "olympic", .{
+        "olympic", @as(ChatConfig, .{
             .model_type = "qwen",
             .model_name = "OlympicCoder-7B-4bit",
             .chat_format =
@@ -197,10 +197,10 @@ const ConfigMap = std.StaticStringMap(ChatConfig).initComptime(.{
             \\
             ,
             .chat_inputs = &[_][]const u8{"Write a python program to calculate the 10th fibonacci number"},
-        },
+        }),
     },
     .{
-        "qwen-fim", .{
+        "qwen-fim", @as(ChatConfig, .{
             .model_type = "qwen",
             .model_name = "Qwen2.5-Coder-1.5B-4bit",
             .chat_format = "<|fim_prefix|>{s}<|fim_suffix|>{s}<|fim_middle|>",
@@ -215,10 +215,10 @@ const ConfigMap = std.StaticStringMap(ChatConfig).initComptime(.{
                 \\    right = [x for x in arr if x > pivot]
                 \\    return quicksort(left) + middle + quicksort(right)
             },
-        },
+        }),
     },
     .{
-        "qwen-coder", .{
+        "qwen-coder", @as(ChatConfig, .{
             .model_type = "qwen",
             .model_name = "Qwen2.5-Coder-1.5B-4bit",
             .chat_inputs = &.{
@@ -287,7 +287,7 @@ const ConfigMap = std.StaticStringMap(ChatConfig).initComptime(.{
                 \\    
                 \\    # Student borrows a book
             },
-        },
+        }),
     },
 });
 

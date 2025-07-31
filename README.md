@@ -5,7 +5,7 @@ A [Zig](https://ziglang.org/) binding for [MLX](https://github.com/ml-explore/ml
 ## Prerequisites
 
 - Apple Silicon Mac
-- Zig v0.13.0
+- Zig v0.14.0
 - CMake
 
 ## Getting Started
