@@ -4,6 +4,14 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const deps = try setupDependencies(b, target, optimize);
+
+    // Create the mlxzig module for external consumption
+    _ = b.addModule("mlxzig", .{
+        .root_source_file = b.path("src/mlx.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const llm_options = try LlmOptions.fromOptions(b);
     const llm_exe = b.addExecutable(.{
         .name = "llm",
