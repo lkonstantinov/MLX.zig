@@ -6,11 +6,19 @@ pub fn build(b: *std.Build) !void {
     const deps = try setupDependencies(b, target, optimize);
 
     // Create the mlxzig module for external consumption
-    _ = b.addModule("mlxzig", .{
+    const mlxzig = b.addModule("mlxzig", .{
         .root_source_file = b.path("src/mlx.zig"),
         .target = target,
         .optimize = optimize,
     });
+
+    const lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "mlxzig",
+        .root_module = mlxzig,
+    });
+    configureExecutable(lib, b, deps);
+    b.installArtifact(lib);
 
     const llm_options = try LlmOptions.fromOptions(b);
     const llm_exe = b.addExecutable(.{
