@@ -87,9 +87,9 @@ pub fn astype(result: *Array, x: anytype, dtype: C.mlx_dtype, stream: Stream) ML
 /// Array Operations
 /// ============================================================================
 pub const maxAll = defineReduceAllOp("mlx_max");
-pub const minAll = defineReduceAllOp("mlx_min_all");
-pub const max = defineReduceAxesOp("mlx_max");
-pub const min = defineReduceAxesOp("mlx_min");
+pub const minAll = defineReduceAllOp("mlx_min");
+pub const max = defineReduceAxesOp("mlx_max_axes");
+pub const min = defineReduceAxesOp("mlx_min_axes");
 pub const rfft = defineFFTOp("mlx_fft_rfft");
 pub const irfft = defineFFTOp("mlx_fft_irfft");
 pub const fft = defineFFTOp("mlx_fft_fft");
@@ -199,8 +199,8 @@ pub fn arange(result: *Array, start: f64, stop: f64, step: f64, dtype: C.mlx_dty
     try mlxOpWithCall(C.mlx_arange, .{ result, start, stop, step, dtype, stream });
 }
 
-pub fn repeat(result: *Array, x: Array, repeats: c_int, axis: c_int, stream: Stream) MLXError!void {
-    try mlxOpWithCall(C.mlx_repeat, .{ result, x, repeats, axis, stream });
+pub fn repeat_axis(result: *Array, x: Array, repeats: c_int, axis: c_int, stream: Stream) MLXError!void {
+    try mlxOpWithCall(C.mlx_repeat_axis, .{ result, x, repeats, axis, stream });
 }
 
 pub fn arraySet(arr: *Array, src: Array) MLXError!void {
@@ -213,6 +213,10 @@ pub fn arrayEval(arr: Array) !void {
 
 pub fn arrayFree(arr: Array) void {
     _ = C.mlx_array_free(arr);
+}
+
+pub fn stack_axis(result: *Array, arrays: VectorArray, axis: c_int, stream: Stream) MLXError!void {
+    try mlxOpWithCall(C.mlx_stack_axis, .{ result, arrays, axis, stream });
 }
 
 /// ============================================================================
@@ -252,6 +256,53 @@ pub fn splitEqualParts(outputs: []const *Array, a: Array, num_splits: c_int, axi
     for (outputs, 0..) |out_ptr, i| {
         try mlxOp(C.mlx_vector_array_get(out_ptr, results, i));
     }
+}
+
+/// ============================================================================
+/// Vector Array Operations
+/// ============================================================================
+pub fn vectorArrayNew() VectorArray {
+    return C.mlx_vector_array_new();
+}
+
+pub fn vectorArraySet(vec: *VectorArray, src: VectorArray) MLXError!void {
+    try mlxOp(C.mlx_vector_array_set(vec, src));
+}
+
+pub fn vectorArrayFree(vec: VectorArray) void {
+    _ = C.mlx_vector_array_free(vec);
+}
+
+pub fn vectorArrayNewData(data: [*]const Array, size: usize) VectorArray {
+    return C.mlx_vector_array_new_data(data, size);
+}
+
+pub fn vectorArrayNewValue(val: Array) VectorArray {
+    return C.mlx_vector_array_new_value(val);
+}
+
+pub fn vectorArraySetData(vec: *VectorArray, data: [*]const Array, size: usize) MLXError!void {
+    try mlxOp(C.mlx_vector_array_set_data(vec, data, size));
+}
+
+pub fn vectorArraySetValue(vec: *VectorArray, val: Array) MLXError!void {
+    try mlxOp(C.mlx_vector_array_set_value(vec, val));
+}
+
+pub fn vectorArrayAppendData(vec: VectorArray, data: [*]const Array, size: usize) MLXError!void {
+    try mlxOp(C.mlx_vector_array_append_data(vec, data, size));
+}
+
+pub fn vectorArrayAppendValue(vec: VectorArray, val: Array) MLXError!void {
+    try mlxOp(C.mlx_vector_array_append_value(vec, val));
+}
+
+pub fn vectorArraySize(vec: VectorArray) usize {
+    return C.mlx_vector_array_size(vec);
+}
+
+pub fn vectorArrayGet(result: *Array, vec: VectorArray, idx: usize) MLXError!void {
+    try mlxOp(C.mlx_vector_array_get(result, vec, idx));
 }
 
 /// ============================================================================
@@ -1336,4 +1387,320 @@ pub fn rEshap(result: *Array, x: Array, comptime pattern: []const u8, dim_values
         if (args.swap_start != null) try mlxOpWithLog(C.mlx_swapaxes(result, result.*, args.swap_start.?, args.swap_end.?, stream), "rEshap.swap");
         try mlxOpWithLog(C.mlx_flatten(result, result.*, args.axis_start, args.axis_end, stream), "rEshap.flatten");
     }
+}
+
+test "stack two 1D arrays along axis 0" {
+    // Create a GPU stream for operations
+    const stream = defaultGpuStreamNew();
+    defer streamFree(stream);
+
+    // Create test data
+    const data1 = [_]f32{ 1.0, 2.0, 3.0 };
+    const data2 = [_]f32{ 4.0, 5.0, 6.0 };
+
+    // Create MLX arrays
+    const arr1 = try arrayNewData(&data1, .{3}, FLOAT32);
+    defer arrayFree(arr1);
+
+    const arr2 = try arrayNewData(&data2, .{3}, FLOAT32);
+    defer arrayFree(arr2);
+
+    // Create vector array with the two arrays
+    const arrays = [_]Array{ arr1, arr2 };
+    const vector_arrays = vectorArrayNewData(&arrays, arrays.len);
+    defer vectorArrayFree(vector_arrays);
+
+    // Stack along axis 0 (default)
+    var result = arrayNew();
+    defer arrayFree(result);
+
+    try stack_axis(&result, vector_arrays, 0, stream);
+
+    // Verify the result shape is [2, 3]
+    const ndim = C.mlx_array_ndim(result);
+    try std.testing.expect(ndim == 2);
+
+    const shape = C.mlx_array_shape(result);
+    try std.testing.expect(shape[0] == 2);
+    try std.testing.expect(shape[1] == 3);
+}
+
+test "stack two 1D arrays along axis 1" {
+    // Create a GPU stream for operations
+    const stream = defaultGpuStreamNew();
+    defer streamFree(stream);
+
+    // Create test data
+    const data1 = [_]f32{ 1.0, 2.0, 3.0 };
+    const data2 = [_]f32{ 4.0, 5.0, 6.0 };
+
+    // Create MLX arrays
+    const arr1 = try arrayNewData(&data1, .{3}, FLOAT32);
+    defer arrayFree(arr1);
+
+    const arr2 = try arrayNewData(&data2, .{3}, FLOAT32);
+    defer arrayFree(arr2);
+
+    // Create vector array with the two arrays
+    const arrays = [_]Array{ arr1, arr2 };
+    const vector_arrays = vectorArrayNewData(&arrays, arrays.len);
+    defer vectorArrayFree(vector_arrays);
+
+    // Stack along axis 1
+    var result = arrayNew();
+    defer arrayFree(result);
+
+    try stack_axis(&result, vector_arrays, 1, stream);
+
+    // Verify the result shape is [3, 2]
+    const ndim = C.mlx_array_ndim(result);
+    try std.testing.expect(ndim == 2);
+
+    const shape = C.mlx_array_shape(result);
+    try std.testing.expect(shape[0] == 3);
+    try std.testing.expect(shape[1] == 2);
+}
+
+test "stack multiple arrays" {
+    // Create a GPU stream for operations
+    const stream = defaultGpuStreamNew();
+    defer streamFree(stream);
+
+    // Create test data
+    const data1 = [_]f32{ 1.0, 2.0 };
+    const data2 = [_]f32{ 3.0, 4.0 };
+    const data3 = [_]f32{ 5.0, 6.0 };
+    const data4 = [_]f32{ 7.0, 8.0 };
+
+    // Create MLX arrays
+    const arr1 = try arrayNewData(&data1, .{2}, FLOAT32);
+    defer arrayFree(arr1);
+
+    const arr2 = try arrayNewData(&data2, .{2}, FLOAT32);
+    defer arrayFree(arr2);
+
+    const arr3 = try arrayNewData(&data3, .{2}, FLOAT32);
+    defer arrayFree(arr3);
+
+    const arr4 = try arrayNewData(&data4, .{2}, FLOAT32);
+    defer arrayFree(arr4);
+
+    // Create vector array with the four arrays
+    const arrays = [_]Array{ arr1, arr2, arr3, arr4 };
+    const vector_arrays = vectorArrayNewData(&arrays, arrays.len);
+    defer vectorArrayFree(vector_arrays);
+
+    // Stack along axis 0
+    var result = arrayNew();
+    defer arrayFree(result);
+
+    try stack_axis(&result, vector_arrays, 0, stream);
+
+    // Verify the result shape is [4, 2]
+    const ndim = C.mlx_array_ndim(result);
+    try std.testing.expect(ndim == 2);
+
+    const shape = C.mlx_array_shape(result);
+    try std.testing.expect(shape[0] == 4);
+    try std.testing.expect(shape[1] == 2);
+}
+
+test "stack 2D arrays" {
+    // Create a GPU stream for operations
+    const stream = defaultGpuStreamNew();
+    defer streamFree(stream);
+
+    // Create 2D test data
+    const data1 = [_]f32{ 1.0, 2.0, 3.0, 4.0 }; // 2x2 matrix
+    const data2 = [_]f32{ 5.0, 6.0, 7.0, 8.0 }; // 2x2 matrix
+
+    // Create MLX 2D arrays
+    const arr1 = try arrayNewData(&data1, .{ 2, 2 }, FLOAT32);
+    defer arrayFree(arr1);
+
+    const arr2 = try arrayNewData(&data2, .{ 2, 2 }, FLOAT32);
+    defer arrayFree(arr2);
+
+    // Create vector array with the two 2D arrays
+    const arrays = [_]Array{ arr1, arr2 };
+    const vector_arrays = vectorArrayNewData(&arrays, arrays.len);
+    defer vectorArrayFree(vector_arrays);
+
+    // Stack along axis 0 (should create 3D array)
+    var result = arrayNew();
+    defer arrayFree(result);
+
+    try stack_axis(&result, vector_arrays, 0, stream);
+
+    // Verify the result shape is [2, 2, 2]
+    const ndim = C.mlx_array_ndim(result);
+    try std.testing.expect(ndim == 3);
+
+    const shape = C.mlx_array_shape(result);
+    try std.testing.expect(shape[0] == 2);
+    try std.testing.expect(shape[1] == 2);
+    try std.testing.expect(shape[2] == 2);
+}
+
+test "vector array creation" {
+    // Create empty vector array
+    const vec_array = vectorArrayNew();
+    defer vectorArrayFree(vec_array);
+
+    // Verify initial size is 0
+    const initial_size = vectorArraySize(vec_array);
+    try std.testing.expect(initial_size == 0);
+}
+
+test "vector array append values" {
+    // Create some test arrays
+    const data1 = [_]f32{ 1.0, 2.0, 3.0 };
+    const data2 = [_]f32{ 4.0, 5.0, 6.0 };
+    const data3 = [_]f32{ 7.0, 8.0, 9.0 };
+
+    const arr1 = try arrayNewData(&data1, .{3}, FLOAT32);
+    defer arrayFree(arr1);
+
+    const arr2 = try arrayNewData(&data2, .{3}, FLOAT32);
+    defer arrayFree(arr2);
+
+    const arr3 = try arrayNewData(&data3, .{3}, FLOAT32);
+    defer arrayFree(arr3);
+
+    // Create empty vector array and append values
+    const vec_array = vectorArrayNew();
+    defer vectorArrayFree(vec_array);
+
+    // Append arrays one by one and verify size after each append
+    try vectorArrayAppendValue(vec_array, arr1);
+    var size = vectorArraySize(vec_array);
+    try std.testing.expect(size == 1);
+
+    try vectorArrayAppendValue(vec_array, arr2);
+    size = vectorArraySize(vec_array);
+    try std.testing.expect(size == 2);
+
+    try vectorArrayAppendValue(vec_array, arr3);
+    size = vectorArraySize(vec_array);
+    try std.testing.expect(size == 3);
+}
+
+test "vector array get values" {
+    // Create some test arrays
+    const data1 = [_]f32{ 1.0, 2.0, 3.0 };
+    const data2 = [_]f32{ 4.0, 5.0, 6.0 };
+    const data3 = [_]f32{ 7.0, 8.0, 9.0 };
+
+    const arr1 = try arrayNewData(&data1, .{3}, FLOAT32);
+    defer arrayFree(arr1);
+
+    const arr2 = try arrayNewData(&data2, .{3}, FLOAT32);
+    defer arrayFree(arr2);
+
+    const arr3 = try arrayNewData(&data3, .{3}, FLOAT32);
+    defer arrayFree(arr3);
+
+    // Create vector array and append values
+    const vec_array = vectorArrayNew();
+    defer vectorArrayFree(vec_array);
+
+    try vectorArrayAppendValue(vec_array, arr1);
+    try vectorArrayAppendValue(vec_array, arr2);
+    try vectorArrayAppendValue(vec_array, arr3);
+
+    // Verify we can get elements back
+    var retrieved1 = arrayNew();
+    defer arrayFree(retrieved1);
+    try vectorArrayGet(&retrieved1, vec_array, 0);
+
+    var retrieved2 = arrayNew();
+    defer arrayFree(retrieved2);
+    try vectorArrayGet(&retrieved2, vec_array, 1);
+
+    var retrieved3 = arrayNew();
+    defer arrayFree(retrieved3);
+    try vectorArrayGet(&retrieved3, vec_array, 2);
+
+    // Verify the retrieved arrays have correct dimensions
+    try std.testing.expect(C.mlx_array_ndim(retrieved1) == 1);
+    try std.testing.expect(C.mlx_array_ndim(retrieved2) == 1);
+    try std.testing.expect(C.mlx_array_ndim(retrieved3) == 1);
+
+    const shape1 = C.mlx_array_shape(retrieved1);
+    const shape2 = C.mlx_array_shape(retrieved2);
+    const shape3 = C.mlx_array_shape(retrieved3);
+
+    try std.testing.expect(shape1[0] == 3);
+    try std.testing.expect(shape2[0] == 3);
+    try std.testing.expect(shape3[0] == 3);
+}
+
+test "vector array creation from data" {
+    const data1 = [_]f32{ 10.0, 20.0 };
+    const data2 = [_]f32{ 30.0, 40.0 };
+
+    const arr1 = try arrayNewData(&data1, .{2}, FLOAT32);
+    defer arrayFree(arr1);
+
+    const arr2 = try arrayNewData(&data2, .{2}, FLOAT32);
+    defer arrayFree(arr2);
+
+    // Create vector array directly from data
+    const arrays = [_]Array{ arr1, arr2 };
+    const vec_array = vectorArrayNewData(&arrays, arrays.len);
+    defer vectorArrayFree(vec_array);
+
+    const size = vectorArraySize(vec_array);
+    try std.testing.expect(size == 2);
+}
+
+test "stack single array" {
+    const stream = defaultGpuStreamNew();
+    defer streamFree(stream);
+
+    const data = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
+    const arr = try arrayNewData(&data, .{ 2, 2 }, FLOAT32);
+    defer arrayFree(arr);
+
+    const arrays = [_]Array{arr};
+    const vector_arrays = vectorArrayNewData(&arrays, arrays.len);
+    defer vectorArrayFree(vector_arrays);
+
+    var result = arrayNew();
+    defer arrayFree(result);
+
+    try stack_axis(&result, vector_arrays, 0, stream);
+
+    // Should add one dimension at the beginning
+    const ndim = C.mlx_array_ndim(result);
+    try std.testing.expect(ndim == 3);
+
+    const shape = C.mlx_array_shape(result);
+    try std.testing.expect(shape[0] == 1); // New dimension
+    try std.testing.expect(shape[1] == 2); // Original dimensions
+    try std.testing.expect(shape[2] == 2);
+}
+
+test "stack arrays with integer data type" {
+    const stream = defaultGpuStreamNew();
+    defer streamFree(stream);
+
+    // Integer arrays
+    const int_data1 = [_]i32{ 1, 2, 3 };
+    const int_data2 = [_]i32{ 4, 5, 6 };
+
+    const int_arr1 = try arrayNewData(&int_data1, .{3}, INT32);
+    defer arrayFree(int_arr1);
+
+    const int_arr2 = try arrayNewData(&int_data2, .{3}, INT32);
+    defer arrayFree(int_arr2);
+
+    const int_arrays = [_]Array{ int_arr1, int_arr2 };
+    const int_vector_arrays = vectorArrayNewData(&int_arrays, int_arrays.len);
+    defer vectorArrayFree(int_vector_arrays);
+
+    var int_result = arrayNew();
+    defer arrayFree(int_result);
+
+    try stack_axis(&int_result, int_vector_arrays, 0, stream);
 }
