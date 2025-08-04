@@ -1058,7 +1058,7 @@ pub const KVCache = struct {
         for (0..ndim) |idx| stop[idx] = arrayDim(self.k, @intCast(idx));
         stop[@intCast(self.axis)] = offset;
         try mlxOp(C.mlx_slice(&self.k, self.k, &start, ndim, &stop, ndim, &strides, ndim, stream));
-        try mlxOp(C.mlx_slice(&self.k, self.v, &start, ndim, &stop, ndim, &strides, ndim, stream));
+        try mlxOp(C.mlx_slice(&self.v, self.v, &start, ndim, &stop, ndim, &strides, ndim, stream));
         std.debug.print("Cache offset set to {d}\n", .{offset});
     }
 
