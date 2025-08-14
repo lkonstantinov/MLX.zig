@@ -171,6 +171,10 @@ pub fn reshape(result: *Array, x: Array, shape: []const c_int, stream: Stream) M
     try mlxOpWithCall(C.mlx_reshape, .{ result, x, shape.ptr, shape.len, stream });
 }
 
+pub fn softmax(result: *Array, x: Array, precise: bool, stream: Stream) MLXError!void {
+    try mlxOpWithCall(C.mlx_softmax, .{ result, x, precise, stream });
+}
+
 pub fn softmax_axes(result: *Array, x: Array, axes: []const c_int, precise: bool, stream: Stream) MLXError!void {
     try mlxOpWithCall(C.mlx_softmax_axes, .{ result, x, axes.ptr, axes.len, precise, stream });
 }
