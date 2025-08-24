@@ -229,15 +229,17 @@ pub fn loadAudio(allocator: std.mem.Allocator, audio_file: []const u8) ![]f32 {
             try float_samples.append(allocator, @as(f32, @floatFromInt(sample)) / 32768.0);
         }
     }
+
+    var stderr_buf: [1024]u8 = undefined;
+    var stderr = process.stderr.?.readerStreaming(&stderr_buf);
+    var err_writer: std.Io.Writer.Allocating = .init(allocator);
+    defer err_writer.deinit();
+    const stderr_cnt = stderr.interface.stream(&err_writer.writer, .unlimited) catch 0;
+    try err_writer.writer.flush();
+
     const term = try process.wait();
-    if (term != .Exited or term.Exited != 0) {
-        var stderr_buf: [1024]u8 = undefined;
-        var stderr = process.stderr.?.reader(&stderr_buf);
-        var error_msg: std.ArrayList(u8) = .empty;
-        defer error_msg.deinit(allocator);
-        var writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &error_msg);
-        _ = try stderr.interface.stream(&writer.writer, std.Io.Limit.limited(4096));
-        std.log.err("Failed to load audio: {s}", .{error_msg.items});
+    if (term != .Exited or term.Exited != 0 or stderr_cnt > 0) {
+        std.log.err("Failed to load audio: {s}", .{try err_writer.toOwnedSlice()});
         return error.FfmpegFailed;
     }
     return float_samples.toOwnedSlice(allocator);
@@ -245,13 +247,9 @@ pub fn loadAudio(allocator: std.mem.Allocator, audio_file: []const u8) ![]f32 {
 
 pub fn loadJson(comptime T: type, allocator: std.mem.Allocator, filename: []const u8, verbose: bool) !std.json.Parsed(T) {
     const printVals = struct {
-        fn printParsedValue(comptime T_: type, _: T_, allocator_: std.mem.Allocator) !void {
-            var string: std.ArrayList(u8) = .empty;
-            defer string.deinit(allocator_);
-            // const formatter = std.json.fmt(value, .{ .whitespace = .indent_2 });
-            // try formatter.format(*string.writer(allocator_));
+        fn printParsedValue(T_: type, value: T_, _: std.mem.Allocator) !void {
             std.debug.print("\nParsed Value:\n", .{});
-            std.debug.print("{s}\n", .{string.items});
+            std.debug.print("{f}\n", .{std.json.fmt(value, .{ .whitespace = .indent_2 })});
         }
     }.printParsedValue;
     const printDiff = struct {
