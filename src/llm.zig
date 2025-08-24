@@ -16,8 +16,8 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const process_args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, process_args);
-    var chat_inputs = std.ArrayList([]const u8).init(allocator);
-    defer chat_inputs.deinit();
+    var chat_inputs: std.ArrayList([]const u8) = .empty;
+    defer chat_inputs.deinit(allocator);
     var config_name: ?[]const u8 = null;
     var model_type_: ?[]const u8 = null;
     var model_name_: ?[]const u8 = null;
@@ -43,7 +43,7 @@ pub fn main() !void {
                 printUsage();
                 std.process.exit(0);
             }
-        } else try chat_inputs.append(arg);
+        } else try chat_inputs.append(allocator, arg);
     }
     var config = ChatConfig.initFromBuild(config_name);
     if (model_type_) |v| config.model_type = v;

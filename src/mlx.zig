@@ -498,13 +498,13 @@ pub const Module = struct {
         return .{
             .allocator = allocator,
             .stream = stream,
-            .allocs_to_free = std.ArrayList([]const u8).init(allocator),
+            .allocs_to_free = .empty,
         };
     }
 
     pub fn allocDupe(self: *Self, key: []const u8) ![]const u8 {
         const owned_key = try self.allocator.dupe(u8, key);
-        try self.allocs_to_free.append(owned_key);
+        try self.allocs_to_free.append(self.allocator, owned_key);
         return owned_key;
     }
 
@@ -516,13 +516,13 @@ pub const Module = struct {
             try std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ parent, name })
         else
             try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ parent, name });
-        try self.allocs_to_free.append(owned_key);
+        try self.allocs_to_free.append(self.allocator, owned_key);
         return owned_key;
     }
 
     pub fn deinit(self: *Self) void {
         for (self.allocs_to_free.items) |key| self.allocator.free(key);
-        self.allocs_to_free.deinit();
+        self.allocs_to_free.deinit(self.allocator);
     }
 };
 
